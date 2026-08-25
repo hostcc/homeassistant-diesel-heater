@@ -75,6 +75,8 @@ After setup, you can configure these options:
 | Comfort Preset Temperature | Temperature for Comfort preset (default: 21°C) |
 | External Temperature Sensor | Select an external HA temperature sensor for automatic offset calibration |
 | Max Auto Offset | Maximum automatic offset when using external sensor (1-9°C) |
+| Burn-off on Shutdown | Run at maximum power before shutting down to burn off soot (default: enabled) |
+| Burn-off Duration | How long to run at max power before shutdown (1-30 minutes, default: 10) |
 
 ## Entities
 
@@ -109,6 +111,7 @@ Fan entity for heater level control (1-10) when in Level mode.
 | Estimated Total Fuel Consumed | Lifetime fuel consumption |
 | Daily Runtime | Hours of operation today |
 | Total Runtime | Cumulative hours of operation |
+| Burn-off Remaining | Seconds left in the current max-power burn-off cycle |
 
 Additional sensors for specific protocols:
 - **Carbon Monoxide** (CBFF): CO level in ppm
@@ -123,12 +126,14 @@ Additional sensors for specific protocols:
 | Problem | Whether an error condition exists |
 | Connected | BLE connection status |
 | Auto Start/Stop | Auto temperature control status |
+| Burn-off Active | Whether a max-power burn-off cycle is running |
 
 ### Switches
 
 | Switch | Description |
 |--------|-------------|
 | Power | Turn heater on/off |
+| Burn-off on Shutdown | Run at max power before shutdown to burn off soot |
 | Auto Temperature Offset | Enable automatic offset using external sensor |
 | Auto Start/Stop | Enable automatic temperature control with full stop |
 | Fahrenheit Mode | Use Fahrenheit for temperature display |
@@ -153,6 +158,7 @@ Additional sensors for specific protocols:
 | Target Temperature | Set target temperature (8-36°C) |
 | Temperature Offset | Manual temperature offset (-9 to +9) |
 | Tank Capacity | Tank capacity for fuel tracking |
+| Burn-off Duration | Minutes at max power before shutdown (1-30, default 10) |
 
 ### Buttons
 
@@ -160,6 +166,8 @@ Additional sensors for specific protocols:
 |--------|-------------|
 | Sync Time | Synchronize heater clock with Home Assistant |
 | Reset Estimated Fuel Remaining | Reset fuel tracking after refueling |
+| Power Off Now | Skip burn-off and power off immediately |
+| Run Burn-off | Run max-power burn-off without shutting down |
 
 ## Actions
 
@@ -215,6 +223,10 @@ title: Daily Fuel Consumption
 ### Temperature control not working
 
 Temperature control only works in **Temperature Mode**. Check the Running Mode select entity and switch from Level Mode if needed.
+
+### Burn-off on shutdown
+
+Turning the heater off can first run at maximum power (default 10 minutes) to burn off soot. The previous heating mode is restored before the real off command. Use **Power Off Now** to skip this. ECU Auto Start/Stop shutdowns cannot be intercepted and skip burn-off.
 
 ### Commands not responding
 

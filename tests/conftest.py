@@ -22,6 +22,19 @@ class _HAStubFinder:
 
     _PREFIXES = ("homeassistant", "bleak", "bleak_retry_connector")
 
+    def find_spec(self, fullname, path=None, target=None):
+        for prefix in self._PREFIXES:
+            if fullname == prefix or fullname.startswith(prefix + "."):
+                from importlib.machinery import ModuleSpec
+                return ModuleSpec(fullname, self, is_package=True)
+        return None
+
+    def create_module(self, spec):
+        return self.load_module(spec.name)
+
+    def exec_module(self, module):
+        return None
+
     def find_module(self, fullname, path=None):
         for prefix in self._PREFIXES:
             if fullname == prefix or fullname.startswith(prefix + "."):

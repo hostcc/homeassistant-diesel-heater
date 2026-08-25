@@ -8,14 +8,16 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from homeassistant.const import EntityCategory, UnitOfTemperature, UnitOfVolume
+from homeassistant.const import EntityCategory, UnitOfTemperature, UnitOfTime, UnitOfVolume
 
 from . import VevorHeaterConfigEntry
 from .const import (
     DOMAIN,
+    MAX_BURNOFF_DURATION,
     MAX_HEATER_OFFSET,
     MAX_LEVEL,
     MAX_TEMP_CELSIUS,
+    MIN_BURNOFF_DURATION,
     MIN_HEATER_OFFSET,
     MIN_LEVEL,
     MIN_TEMP_CELSIUS,
@@ -42,6 +44,7 @@ async def async_setup_entry(
         VevorHeaterTemperatureNumber(coordinator),
         VevorTankCapacityNumber(coordinator),
         VevorCurrentFuelLevelNumber(coordinator),
+        VevorBurnoffDurationNumber(coordinator),
     ]
 
     # Offset number (encrypted + CBFF protocols only)
@@ -354,6 +357,44 @@ class VevorCurrentFuelLevelNumber(CoordinatorEntity[VevorHeaterCoordinator], Num
     async def async_set_native_value(self, value: float) -> None:
         """Set new current fuel level (updates consumed counter)."""
         await self.coordinator.async_set_current_fuel_level(value)
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self.async_write_ha_state()
+
+
+class VevorBurnoffDurationNumber(CoordinatorEntity[VevorHeaterCoordinator], NumberEntity):
+    """Duration of max-power burn-off before shutdown, in minutes."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Burn-off Duration"
+    _attr_icon = "mdi:timer-sand"
+    _attr_native_min_value = MIN_BURNOFF_DURATION
+    _attr_native_max_value = MAX_BURNOFF_DURATION
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = UnitOfTime.MINUTES
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
+        """Initialize the number entity."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.address}_burnoff_duration"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, coordinator.address)},
+            "name": "Vevor Diesel Heater",
+            "manufacturer": "Vevor",
+            "model": "Diesel Heater",
+        }
+
+    @property
+    def native_value(self) -> float:
+        """Return the configured burn-off duration."""
+        return self.coordinator.burnoff_duration_minutes
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Set burn-off duration in minutes."""
+        await self.coordinator.async_set_burnoff_duration(int(value))
 
     @callback
     def _handle_coordinator_update(self) -> None:

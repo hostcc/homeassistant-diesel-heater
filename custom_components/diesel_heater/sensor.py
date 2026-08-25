@@ -70,6 +70,7 @@ async def async_setup_entry(
         VevorFuelRemainingSensor(coordinator),
         VevorLastRefueledSensor(coordinator),
         VevorFuelConsumedSinceResetSensor(coordinator),
+        VevorBurnoffRemainingSensor(coordinator),
     ]
 
     # Altitude sensor (not available for Hcalory - @Xev, issue #34)
@@ -801,3 +802,27 @@ class VevorProtocolSensor(VevorSensorBase):
         """Return if entity is available."""
         # Always available once coordinator is set up
         return self.coordinator.last_update_success
+
+
+class VevorBurnoffRemainingSensor(VevorSensorBase):
+    """Remaining time in the current max-power burn-off cycle."""
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:timer-sand"
+
+    def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, "burnoff_remaining", "Burn-off Remaining")
+
+    @property
+    def native_value(self) -> int | None:
+        """Return remaining burn-off seconds."""
+        return self.coordinator.burnoff_remaining_seconds
+
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self.coordinator.burnoff_active

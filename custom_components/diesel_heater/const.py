@@ -255,6 +255,15 @@ STORAGE_KEY_LAST_REFUELED: Final = "last_refueled"
 # Auto offset persistence key
 STORAGE_KEY_AUTO_OFFSET_ENABLED: Final = "auto_offset_enabled"
 
+# Max-power burn-off (soot burn-off) before shutdown
+CONF_BURNOFF_ENABLED: Final = "burnoff_on_shutdown"
+CONF_BURNOFF_DURATION: Final = "burnoff_duration"
+DEFAULT_BURNOFF_ENABLED: Final = True
+DEFAULT_BURNOFF_DURATION: Final = 10  # minutes
+MIN_BURNOFF_DURATION: Final = 1
+MAX_BURNOFF_DURATION: Final = 30
+STORAGE_KEY_BURNOFF: Final = "burnoff"
+
 # History settings
 MAX_HISTORY_DAYS: Final = 30  # Keep last 30 days of daily consumption
 

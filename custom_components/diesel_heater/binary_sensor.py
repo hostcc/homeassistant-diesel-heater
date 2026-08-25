@@ -35,6 +35,7 @@ async def async_setup_entry(
         VevorHeaterActiveSensor(coordinator),
         VevorHeaterProblemSensor(coordinator),
         VevorHeaterConnectedSensor(coordinator),
+        VevorBurnoffActiveSensor(coordinator),
     ]
 
     # Auto Start/Stop binary sensor (AA66Encrypted, ABBA, CBFF)
@@ -179,6 +180,39 @@ class VevorAutoStartStopSensor(
     def is_on(self) -> bool | None:
         """Return true if Auto Start/Stop is enabled."""
         return self.coordinator.data.get("auto_start_stop")
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self.async_write_ha_state()
+
+
+class VevorBurnoffActiveSensor(
+    CoordinatorEntity[VevorHeaterCoordinator], BinarySensorEntity
+):
+    """Whether a max-power burn-off cycle is currently running."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Burn-off Active"
+    _attr_device_class = BinarySensorDeviceClass.RUNNING
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:fire-alert"
+
+    def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
+        """Initialize the binary sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.address}_burnoff_active"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, coordinator.address)},
+            "name": "Vevor Diesel Heater",
+            "manufacturer": "Vevor",
+            "model": "Diesel Heater",
+        }
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if burn-off is in progress."""
+        return self.coordinator.burnoff_active
 
     @callback
     def _handle_coordinator_update(self) -> None:

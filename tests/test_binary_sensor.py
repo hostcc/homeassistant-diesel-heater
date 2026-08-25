@@ -12,6 +12,7 @@ from custom_components.diesel_heater.binary_sensor import (
     VevorHeaterProblemSensor,
     VevorHeaterConnectedSensor,
     VevorAutoStartStopSensor,
+    VevorBurnoffActiveSensor,
     async_setup_entry,
 )
 from custom_components.diesel_heater.const import (
@@ -183,8 +184,8 @@ class TestAsyncSetupEntry:
         # Verify async_add_entities was called
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 1 creates only 3 core sensors (no AutoStartStop)
-        assert len(call_args) == 3
+        # Mode 1 creates only 4 core sensors (no AutoStartStop)
+        assert len(call_args) == 4
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_0(self):
@@ -200,8 +201,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 0 creates all 4 sensors
-        assert len(call_args) == 4
+        # Mode 0 creates all 5 sensors
+        assert len(call_args) == 5
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_5(self):
@@ -217,8 +218,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 5 includes AutoStartStop (4 sensors)
-        assert len(call_args) == 4
+        # Mode 5 includes AutoStartStop (5 sensors)
+        assert len(call_args) == 5
 
 
 # ---------------------------------------------------------------------------
@@ -460,3 +461,23 @@ class TestHandleCoordinatorUpdate:
         sensor._handle_coordinator_update()
 
         sensor.async_write_ha_state.assert_called_once()
+
+
+class TestVevorBurnoffActiveSensor:
+    """Tests for burn-off active binary sensor."""
+
+    def test_is_on_when_active(self):
+        """Test is_on when burn-off is running."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_active = True
+        sensor = VevorBurnoffActiveSensor(coordinator)
+
+        assert sensor.is_on is True
+
+    def test_is_on_when_inactive(self):
+        """Test is_on when burn-off is not running."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_active = False
+        sensor = VevorBurnoffActiveSensor(coordinator)
+
+        assert sensor.is_on is False
