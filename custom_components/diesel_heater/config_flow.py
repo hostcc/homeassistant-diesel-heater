@@ -17,24 +17,18 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_AUTO_OFFSET_MAX,
-    CONF_BURNOFF_DURATION,
-    CONF_BURNOFF_ENABLED,
     CONF_EXTERNAL_TEMP_SENSOR,
     CONF_PIN,
     CONF_PRESET_AWAY_TEMP,
     CONF_PRESET_COMFORT_TEMP,
     DEFAULT_AUTO_OFFSET_MAX,
-    DEFAULT_BURNOFF_DURATION,
-    DEFAULT_BURNOFF_ENABLED,
     DEFAULT_PIN,
     DEFAULT_PRESET_AWAY_TEMP,
     DEFAULT_PRESET_COMFORT_TEMP,
     DOMAIN,
     MAX_AUTO_OFFSET_MAX,
-    MAX_BURNOFF_DURATION,
     MAX_PIN,
     MIN_AUTO_OFFSET_MAX,
-    MIN_BURNOFF_DURATION,
     MIN_PIN,
     SERVICE_UUID,
 )
@@ -292,21 +286,6 @@ class VevorHeaterOptionsFlowHandler(config_entries.OptionsFlow):
             ): vol.All(
                 vol.Coerce(int),
                 vol.Range(min=8, max=36),
-            ),
-            vol.Optional(
-                CONF_BURNOFF_ENABLED,
-                default=self.config_entry.data.get(
-                    CONF_BURNOFF_ENABLED, DEFAULT_BURNOFF_ENABLED
-                ),
-            ): bool,
-            vol.Optional(
-                CONF_BURNOFF_DURATION,
-                default=self.config_entry.data.get(
-                    CONF_BURNOFF_DURATION, DEFAULT_BURNOFF_DURATION
-                ),
-            ): vol.All(
-                vol.Coerce(int),
-                vol.Range(min=MIN_BURNOFF_DURATION, max=MAX_BURNOFF_DURATION),
             ),
             vol.Optional(
                 CONF_EXTERNAL_TEMP_SENSOR,

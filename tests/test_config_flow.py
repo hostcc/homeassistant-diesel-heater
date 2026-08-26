@@ -473,18 +473,6 @@ class TestOptionsFlow:
         assert CONF_PRESET_AWAY_TEMP in schema_keys
         assert CONF_PRESET_COMFORT_TEMP in schema_keys
 
-    async def test_schema_has_burnoff_fields(self):
-        flow = self._create_flow()
-
-        result = await flow.async_step_init()
-
-        schema_keys = {
-            k.schema for k in result["data_schema"].schema.keys()
-            if hasattr(k, "schema")
-        }
-        assert CONF_BURNOFF_ENABLED in schema_keys
-        assert CONF_BURNOFF_DURATION in schema_keys
-
     async def test_schema_has_external_sensor_field(self):
         flow = self._create_flow()
 
@@ -605,10 +593,12 @@ class TestOptionsFlow:
         assert CONF_EXTERNAL_TEMP_SENSOR not in new_data
 
     async def test_preserves_existing_data(self):
-        """Options update should preserve data keys not in user_input."""
+        """Options update should preserve data keys not in user_input, including entity-persisted burn-off settings."""
         flow = self._create_flow(data={
             CONF_ADDRESS: MOCK_ADDRESS,
             CONF_PIN: DEFAULT_PIN,
+            CONF_BURNOFF_ENABLED: False,
+            CONF_BURNOFF_DURATION: 15,
         })
 
         await flow.async_step_init(user_input={
@@ -621,20 +611,5 @@ class TestOptionsFlow:
         new_data = call_kwargs[1]["data"]
         # Address should still be there (from original data)
         assert new_data[CONF_ADDRESS] == MOCK_ADDRESS
-
-    async def test_updates_burnoff_options(self):
-        flow = self._create_flow()
-
-        result = await flow.async_step_init(user_input={
-            CONF_PIN: DEFAULT_PIN,
-            CONF_PRESET_AWAY_TEMP: DEFAULT_PRESET_AWAY_TEMP,
-            CONF_PRESET_COMFORT_TEMP: DEFAULT_PRESET_COMFORT_TEMP,
-            CONF_BURNOFF_ENABLED: False,
-            CONF_BURNOFF_DURATION: 15,
-        })
-
-        assert result["type"] == "create_entry"
-        call_kwargs = flow.hass.config_entries.async_update_entry.call_args
-        new_data = call_kwargs[1]["data"]
         assert new_data[CONF_BURNOFF_ENABLED] is False
         assert new_data[CONF_BURNOFF_DURATION] == 15

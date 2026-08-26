@@ -235,8 +235,6 @@ After setup, go to the integration's **Configure** button to access these option
 - **Preset Comfort Temperature**: Target temperature for Comfort preset (default: 22°C)
 - **External Temperature Sensor**: Select an external HA temperature sensor for auto offset adjustment
 - **Auto Offset Max**: Maximum offset value when using external sensor (1-9, only shown when external sensor is configured)
-- **Burn-off on Shutdown**: Before turning off, run at maximum power to burn soot (enabled by default)
-- **Burn-off Duration**: How long to run at max power before shutdown (1-30 minutes, default 10)
 
 ### Entities Created
 
@@ -615,7 +613,8 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
 - **Burn-off on Shutdown**: Before power-off, the heater can run at maximum power to burn off soot
   - Configurable duration (default 10 minutes, range 1-30)
   - Previous heating mode (Temperature vs Level) and setpoint are restored immediately before the real off command
-  - Enable/disable via `switch.*_burnoff_on_shutdown` (on by default) or integration options
+  - Enable/disable via `switch.*_burnoff_on_shutdown` (on by default)
+  - Duration via `number.*_burnoff_duration` (default 10 minutes)
   - `button.*_power_off_now` skips burn-off and turns the heater off immediately
   - `button.*_run_burnoff` runs max power without shutting down (e.g. weekly clean)
   - In-progress burn-off survives Home Assistant restart

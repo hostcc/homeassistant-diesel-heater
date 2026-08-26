@@ -75,8 +75,6 @@ After setup, you can configure these options:
 | Comfort Preset Temperature | Temperature for Comfort preset (default: 21°C) |
 | External Temperature Sensor | Select an external HA temperature sensor for automatic offset calibration |
 | Max Auto Offset | Maximum automatic offset when using external sensor (1-9°C) |
-| Burn-off on Shutdown | Run at maximum power before shutting down to burn off soot (default: enabled) |
-| Burn-off Duration | How long to run at max power before shutdown (1-30 minutes, default: 10) |
 
 ## Entities
 
