@@ -32,6 +32,7 @@ async def async_setup_entry(
     # Core switches (all protocols)
     entities: list[SwitchEntity] = [
         VevorHeaterPowerSwitch(coordinator),
+        VevorBurnoffSwitch(coordinator),
     ]
 
     # Auto Temperature Offset (not available for Hcalory - @Xev, issue #34)
@@ -92,6 +93,44 @@ class VevorHeaterPowerSwitch(CoordinatorEntity[VevorHeaterCoordinator], SwitchEn
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the heater off."""
         await self.coordinator.async_turn_off()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self.async_write_ha_state()
+
+
+class VevorBurnoffSwitch(CoordinatorEntity[VevorHeaterCoordinator], SwitchEntity):
+    """Enable max-power burn-off before shutdown."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Burn-off on Shutdown"
+    _attr_icon = "mdi:fire"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
+        """Initialize the switch."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.address}_burnoff_on_shutdown"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, coordinator.address)},
+            "name": "Vevor Diesel Heater",
+            "manufacturer": "Vevor",
+            "model": "Diesel Heater",
+        }
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if burn-off before shutdown is enabled."""
+        return self.coordinator.burnoff_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable burn-off before shutdown."""
+        await self.coordinator.async_set_burnoff_enabled(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable burn-off before shutdown."""
+        await self.coordinator.async_set_burnoff_enabled(False)
 
     @callback
     def _handle_coordinator_update(self) -> None:

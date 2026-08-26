@@ -5,7 +5,8 @@ import asyncio
 import logging
 import random
 import time
-from datetime import datetime, timedelta
+from contextlib import suppress
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from bleak import BleakClient
@@ -38,10 +39,14 @@ from .const import (
     CHARACTERISTIC_UUID_ALT,
     CONF_AUTO_OFFSET_ENABLED,
     CONF_AUTO_OFFSET_MAX,
+    CONF_BURNOFF_DURATION,
+    CONF_BURNOFF_ENABLED,
     CONF_EXTERNAL_TEMP_SENSOR,
     CONF_PIN,
     CONF_TEMPERATURE_OFFSET,
     DEFAULT_AUTO_OFFSET_MAX,
+    DEFAULT_BURNOFF_DURATION,
+    DEFAULT_BURNOFF_ENABLED,
     DEFAULT_PIN,
     DEFAULT_TEMPERATURE_OFFSET,
     DOMAIN,
@@ -49,18 +54,28 @@ from .const import (
     HCALORY_MVP2_NOTIFY_UUID,
     HCALORY_MVP2_SERVICE_UUID,
     HCALORY_MVP2_WRITE_UUID,
+    MAX_BURNOFF_DURATION,
     MAX_HEATER_OFFSET,
     MAX_HISTORY_DAYS,
+    MAX_LEVEL,
+    MIN_BURNOFF_DURATION,
     MIN_HEATER_OFFSET,
     PROTOCOL_HEADER_ABBA,
     PROTOCOL_HEADER_CBFF,
     PROTOCOL_HEADER_AA77,
+    RUNNING_MODE_LEVEL,
+    RUNNING_MODE_TEMPERATURE,
+    RUNNING_MODE_VENTILATION,
+    RUNNING_STATE_ON,
+    RUNNING_STEP_COOLDOWN,
     RUNNING_STEP_RUNNING,
+    RUNNING_STEP_VENTILATION,
     SENSOR_TEMP_MAX,
     SENSOR_TEMP_MIN,
     SERVICE_UUID,
     SERVICE_UUID_ALT,
     STORAGE_KEY_AUTO_OFFSET_ENABLED,
+    STORAGE_KEY_BURNOFF,
     STORAGE_KEY_FUEL_SINCE_RESET,
     STORAGE_KEY_LAST_REFUELED,
     STORAGE_KEY_TANK_CAPACITY,
@@ -220,6 +235,20 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._last_auto_offset_time: float = 0.0
         self._current_heater_offset: int = 0  # Current offset sent to heater via cmd 12
 
+        # Max-power burn-off (soot burn-off) before shutdown
+        self._burnoff_lock = asyncio.Lock()
+        self._burnoff_cancel_event = asyncio.Event()
+        self._burnoff_task: asyncio.Task[None] | None = None
+        self._burnoff_active = False
+        self._burnoff_shutdown_after = False
+        self._burnoff_ends_at: datetime | None = None
+        self._burnoff_saved_mode: int | None = None
+        self._burnoff_saved_level: int | None = None
+        self._burnoff_saved_temp: float | None = None
+        self._burnoff_applying = False
+        self.data["burnoff_active"] = False
+        self.data["burnoff_remaining"] = None
+
     @property
     def protocol_mode(self) -> int:
         """Return the detected BLE protocol mode (0=unknown, 1-7=detected)."""
@@ -341,6 +370,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 auto_offset_enabled = data.get(STORAGE_KEY_AUTO_OFFSET_ENABLED, False)
                 self.data["auto_offset_enabled"] = auto_offset_enabled
                 self._logger.debug("Loaded auto_offset_enabled: %s", auto_offset_enabled)
+
+                # Resume in-progress max-power burn-off after HA restart
+                await self._load_burnoff_state(data.get(STORAGE_KEY_BURNOFF))
 
                 # Import existing history into statistics for native graphing
                 await self._import_all_history_statistics()
@@ -500,6 +532,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 STORAGE_KEY_LAST_REFUELED: self.data.get("last_refueled"),
                 # Settings
                 STORAGE_KEY_AUTO_OFFSET_ENABLED: self.data.get("auto_offset_enabled", False),
+                STORAGE_KEY_BURNOFF: self._burnoff_storage_payload(),
             }
             await self._store.async_save(data)
             self._logger.debug(
@@ -1905,19 +1938,234 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         # Should not reach here, but just in case
         return False
 
-    async def async_turn_on(self) -> None:
-        """Turn heater on."""
-        # ABBA uses a toggle command (0xA1) for both ON and OFF.
-        # Guard against accidental toggle: skip if already heating.
-        if self._protocol_mode == 5 and self.data.get("running_state", 0) == 1:
-            self._logger.info("ABBA: Heater already on, skipping toggle command")
-            return
-        success = await self._send_command(3, 1)
-        if success:
-            await self.async_request_refresh()
+    @property
+    def burnoff_enabled(self) -> bool:
+        """Return whether max-power burn-off before shutdown is enabled."""
+        return bool(
+            self.config_entry.data.get(CONF_BURNOFF_ENABLED, DEFAULT_BURNOFF_ENABLED)
+        )
 
-    async def async_turn_off(self) -> None:
-        """Turn heater off."""
+    @property
+    def burnoff_duration_minutes(self) -> int:
+        """Return configured burn-off duration in minutes."""
+        try:
+            value = int(
+                self.config_entry.data.get(
+                    CONF_BURNOFF_DURATION, DEFAULT_BURNOFF_DURATION
+                )
+            )
+        except (TypeError, ValueError):
+            value = DEFAULT_BURNOFF_DURATION
+        return max(MIN_BURNOFF_DURATION, min(MAX_BURNOFF_DURATION, value))
+
+    @property
+    def burnoff_active(self) -> bool:
+        """Return whether a burn-off cycle is currently running."""
+        return self._burnoff_active
+
+    @property
+    def burnoff_remaining_seconds(self) -> int | None:
+        """Return remaining burn-off time in seconds, or None if inactive."""
+        if not self._burnoff_active or self._burnoff_ends_at is None:
+            return None
+        remaining = (self._burnoff_ends_at - datetime.now(timezone.utc)).total_seconds()
+        return max(0, int(remaining))
+
+    def _burnoff_storage_payload(self) -> dict[str, Any] | None:
+        """Return persistable burn-off state, or None when inactive."""
+        if not self._burnoff_active:
+            return None
+        ends_at = self._burnoff_ends_at
+        return {
+            "active": True,
+            "shutdown_after": self._burnoff_shutdown_after,
+            "ends_at": ends_at.isoformat() if ends_at is not None else None,
+            "saved_mode": self._burnoff_saved_mode,
+            "saved_level": self._burnoff_saved_level,
+            "saved_temp": self._burnoff_saved_temp,
+        }
+
+    async def _load_burnoff_state(self, burnoff: dict[str, Any] | None) -> None:
+        """Restore an in-progress burn-off after Home Assistant restart."""
+        if not burnoff or not burnoff.get("active"):
+            return
+
+        self._burnoff_active = True
+        self._burnoff_shutdown_after = bool(burnoff.get("shutdown_after", True))
+        self._burnoff_saved_mode = burnoff.get("saved_mode")
+        self._burnoff_saved_level = burnoff.get("saved_level")
+        self._burnoff_saved_temp = burnoff.get("saved_temp")
+
+        ends_at = burnoff.get("ends_at")
+        parsed: datetime | None = None
+        if ends_at:
+            parsed = dt_util.parse_datetime(ends_at)
+            if not isinstance(parsed, datetime):
+                try:
+                    parsed = datetime.fromisoformat(str(ends_at))
+                except (TypeError, ValueError):
+                    parsed = None
+        if parsed is not None and parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        self._burnoff_ends_at = parsed or datetime.now(timezone.utc)
+
+        remaining = self.burnoff_remaining_seconds
+        self._logger.info(
+            "Resuming in-progress burn-off (remaining=%ss, shutdown_after=%s)",
+            remaining,
+            self._burnoff_shutdown_after,
+        )
+        self._notify_burnoff_state()
+        self._schedule_burnoff_wait()
+
+    def _notify_burnoff_state(self) -> None:
+        """Push burn-off status into coordinator data for entities."""
+        self.data["burnoff_active"] = self._burnoff_active
+        self.data["burnoff_remaining"] = self.burnoff_remaining_seconds
+        self.async_set_updated_data(self.data)
+
+    async def async_set_burnoff_enabled(self, enabled: bool) -> None:
+        """Enable or disable max-power burn-off before shutdown."""
+        new_data = {**self.config_entry.data, CONF_BURNOFF_ENABLED: bool(enabled)}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        self.async_set_updated_data(self.data)
+
+    async def async_set_burnoff_duration(self, minutes: int) -> None:
+        """Set burn-off duration in minutes.
+
+        Changing duration during an active cycle does not reset the current timer.
+        """
+        try:
+            value = int(minutes)
+        except (TypeError, ValueError):
+            value = DEFAULT_BURNOFF_DURATION
+        value = max(MIN_BURNOFF_DURATION, min(MAX_BURNOFF_DURATION, value))
+        new_data = {**self.config_entry.data, CONF_BURNOFF_DURATION: value}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        self.async_set_updated_data(self.data)
+
+    def _should_burnoff_before_shutdown(self) -> bool:
+        """Return True if a shutdown request should start max-power burn-off."""
+        if not self.burnoff_enabled:
+            return False
+        if self.burnoff_duration_minutes < 1:
+            return False
+        if self.data.get("running_state") != RUNNING_STATE_ON:
+            return False
+        step = self.data.get("running_step")
+        if step in (RUNNING_STEP_COOLDOWN, RUNNING_STEP_VENTILATION):
+            return False
+        if self.data.get("running_mode") == RUNNING_MODE_VENTILATION:
+            return False
+        return True
+
+    def _schedule_burnoff_wait(self) -> None:
+        """Schedule the burn-off wait task on the running event loop."""
+        if self._burnoff_task is not None and not self._burnoff_task.done():
+            return
+        self._burnoff_cancel_event.clear()
+        self._burnoff_task = asyncio.create_task(self._burnoff_wait())
+
+    async def _burnoff_wait(self) -> None:
+        """Wait until burn-off ends, then restore mode and optionally power off."""
+        try:
+            while True:
+                remaining = self.burnoff_remaining_seconds
+                self._notify_burnoff_state()
+                if remaining is None or remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        self._burnoff_cancel_event.wait(),
+                        timeout=min(remaining, 30),
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    continue
+            if self._burnoff_cancel_event.is_set():
+                return
+            await self._complete_burnoff()
+        except asyncio.CancelledError:
+            self._logger.debug("Burn-off wait cancelled")
+            raise
+        except Exception:
+            self._logger.exception("Burn-off wait failed")
+
+    async def _apply_max_power(self) -> None:
+        """Switch to Level mode and set maximum heater level."""
+        self._burnoff_applying = True
+        try:
+            if self.data.get("running_mode") != RUNNING_MODE_LEVEL:
+                await self.async_set_mode(RUNNING_MODE_LEVEL)
+            await self.async_set_level(MAX_LEVEL)
+        finally:
+            self._burnoff_applying = False
+
+    async def _restore_saved_mode(self) -> None:
+        """Restore the heating mode and setpoint captured before burn-off."""
+        mode = self._burnoff_saved_mode
+        level = self._burnoff_saved_level
+        temp = self._burnoff_saved_temp
+        if mode is None:
+            return
+        self._burnoff_applying = True
+        try:
+            await self.async_set_mode(int(mode))
+            if mode == RUNNING_MODE_LEVEL and level is not None:
+                await self.async_set_level(int(level))
+            elif mode == RUNNING_MODE_TEMPERATURE and temp is not None:
+                await self.async_set_temperature(float(temp))
+        finally:
+            self._burnoff_applying = False
+
+    async def _clear_burnoff_state(self) -> None:
+        """Clear transient burn-off state and persist the inactive status."""
+        self._burnoff_active = False
+        self._burnoff_shutdown_after = False
+        self._burnoff_ends_at = None
+        self._burnoff_saved_mode = None
+        self._burnoff_saved_level = None
+        self._burnoff_saved_temp = None
+        self._burnoff_task = None
+        await self.async_save_data()
+        self._notify_burnoff_state()
+
+    async def _cancel_burnoff(self, *, restore: bool) -> None:
+        """Cancel an in-progress burn-off, optionally restoring the previous mode."""
+        if not self._burnoff_active and self._burnoff_task is None:
+            return
+
+        self._burnoff_cancel_event.set()
+        task = self._burnoff_task
+        self._burnoff_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+
+        async with self._burnoff_lock:
+            if not self._burnoff_active:
+                return
+            if restore:
+                await self._restore_saved_mode()
+            await self._clear_burnoff_state()
+
+    async def _complete_burnoff(self) -> None:
+        """Finish burn-off: restore previous mode, then power off if requested."""
+        async with self._burnoff_lock:
+            if not self._burnoff_active:
+                return
+            shutdown_after = self._burnoff_shutdown_after
+            self._logger.info(
+                "Burn-off complete (shutdown_after=%s)", shutdown_after
+            )
+            await self._restore_saved_mode()
+            await self._clear_burnoff_state()
+        if shutdown_after:
+            await self._power_off()
+
+    async def _power_off(self) -> None:
+        """Send the real power-off command."""
         # ABBA uses a toggle command (0xA1) for both ON and OFF.
         # Guard against accidental toggle: skip if already off.
         if self._protocol_mode == 5 and self.data.get("running_state", 0) == 0:
@@ -1927,6 +2175,97 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         if success:
             await self.async_request_refresh()
 
+    async def async_start_burnoff(self, *, shutdown_after: bool = True) -> None:
+        """Run at max power, optionally shutting down when the timer expires.
+
+        Snapshots the current running mode and setpoint so they can be restored
+        before power-off (or when burn-off is cancelled).
+        """
+        async with self._burnoff_lock:
+            if self._burnoff_active:
+                if shutdown_after and not self._burnoff_shutdown_after:
+                    self._burnoff_shutdown_after = True
+                    await self.async_save_data()
+                self._logger.debug(
+                    "Burn-off already in progress, ignoring duplicate start"
+                )
+                return
+
+            if self.data.get("running_state") != RUNNING_STATE_ON:
+                self._logger.warning("Cannot start burn-off: heater is not running")
+                return
+
+            self._burnoff_saved_mode = self.data.get("running_mode")
+            self._burnoff_saved_level = self.data.get("set_level")
+            self._burnoff_saved_temp = self.data.get("set_temp")
+            self._burnoff_shutdown_after = shutdown_after
+            self._burnoff_active = True
+            duration = self.burnoff_duration_minutes
+            self._burnoff_ends_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
+
+            self._logger.info(
+                "Starting max-power burn-off for %d min "
+                "(shutdown_after=%s, saved mode=%s level=%s temp=%s)",
+                duration,
+                shutdown_after,
+                self._burnoff_saved_mode,
+                self._burnoff_saved_level,
+                self._burnoff_saved_temp,
+            )
+
+            await self._apply_max_power()
+            await self.async_save_data()
+            self._notify_burnoff_state()
+            self._schedule_burnoff_wait()
+
+    async def async_run_burnoff(self) -> None:
+        """Run a max-power burn-off without shutting down afterwards."""
+        await self.async_start_burnoff(shutdown_after=False)
+
+    async def async_power_off_now(self) -> None:
+        """Skip burn-off and power off immediately."""
+        await self.async_turn_off(immediate=True)
+
+    async def async_turn_on(self) -> None:
+        """Turn heater on."""
+        await self._cancel_burnoff(restore=True)
+        # ABBA uses a toggle command (0xA1) for both ON and OFF.
+        # Guard against accidental toggle: skip if already heating.
+        if self._protocol_mode == 5 and self.data.get("running_state", 0) == 1:
+            self._logger.info("ABBA: Heater already on, skipping toggle command")
+            return
+        success = await self._send_command(3, 1)
+        if success:
+            await self.async_request_refresh()
+
+    async def async_turn_off(self, *, immediate: bool = False) -> None:
+        """Turn heater off.
+
+        By default, when burn-off is enabled, this switches to max power for the
+        configured duration, restores the previous heating mode, then sends the
+        real power-off command. Pass immediate=True to skip burn-off.
+        """
+        # ABBA uses a toggle command (0xA1) for both ON and OFF.
+        # Guard against accidental toggle: skip if already off.
+        if self._protocol_mode == 5 and self.data.get("running_state", 0) == 0:
+            self._logger.info("ABBA: Heater already off, skipping toggle command")
+            return
+
+        if immediate:
+            await self._cancel_burnoff(restore=True)
+            await self._power_off()
+            return
+
+        if self._burnoff_active:
+            self._logger.debug("Burn-off already in progress, ignoring duplicate off")
+            return
+
+        if self._should_burnoff_before_shutdown():
+            await self.async_start_burnoff(shutdown_after=True)
+            return
+
+        await self._power_off()
+
     async def async_set_level(self, level: int) -> None:
         """Set heater level (1-10).
 
@@ -1934,6 +2273,10 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         - Hcalory uses SEPARATE commands: cmd 5 for level, cmd 4 for temperature
         - AAXX protocols use SAME command (cmd 4) for both level and temperature
         """
+        if self._burnoff_active and not self._burnoff_applying:
+            self._logger.info("Ignoring level change during burn-off")
+            return
+
         level = max(1, min(10, level))
 
         # CBFF and Hcalory use SEPARATE commands: cmd 5 for level, cmd 4 for temperature
@@ -1966,6 +2309,10 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         - AAXX protocols (modes 1-4): 8-36°C
         - Other protocols: 8-36°C (safe default)
         """
+        if self._burnoff_active and not self._burnoff_applying:
+            self._logger.info("Ignoring temperature change during burn-off")
+            return
+
         current_temp = self.data.get("set_temp", "unknown")
         current_mode = self.data.get("running_mode", "unknown")
 
@@ -2010,6 +2357,10 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         Mode 3 (Ventilation) is ABBA-only and only works when heater is in standby.
         It activates fan-only mode without heating.
         """
+        if self._burnoff_active and not self._burnoff_applying:
+            self._logger.info("Ignoring mode change during burn-off")
+            return
+
         # Ventilation mode (ABBA only)
         if mode == 3:
             if self._protocol_mode != 5:
@@ -2401,6 +2752,15 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Shutdown coordinator."""
         self._logger.debug("Shutting down Vevor Heater coordinator")
+
+        # Stop the burn-off wait task; in-progress state is already persisted
+        self._burnoff_cancel_event.set()
+        task = self._burnoff_task
+        self._burnoff_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
 
         # Clean up external sensor listener
         if self._auto_offset_unsub:

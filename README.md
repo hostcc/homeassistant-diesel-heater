@@ -33,6 +33,7 @@ Control your Vevor/BYD/HeaterCC/Sunster/Hcalory diesel heater from Home Assistan
   - Tank Volume, Pump Type, Temperature Offset
 - 🌡️ **Auto Temperature Offset** - Automatic offset adjustment using external temperature sensor
 - ⏰ **Time Sync** - Synchronize heater clock with Home Assistant
+- 🔥 **Burn-off on Shutdown** - Run at max power before power-off to burn soot, then restore the previous heating mode
 
 ## Table of Contents
 
@@ -181,6 +182,14 @@ logger:
 - The integration auto-detects and converts temperatures
 - If issues persist, check the logs for "protocol" messages
 
+### Burn-off on Shutdown
+
+When you turn the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10. Burn-off is **off by default**.
+
+- Enable with `switch.*_burnoff_on_shutdown`; skip a cycle with **Power Off Now**
+- Turning the heater back on during burn-off cancels the delayed off and restores the previous mode
+- **Limitation:** ECU Auto Start/Stop can shut the heater down on its own (±2°C). Home Assistant cannot intercept those shutdowns, so they skip burn-off
+
 ## Finding Your Heater's MAC Address
 
 Before adding the integration, you need to find your heater's Bluetooth MAC address:
@@ -238,17 +247,23 @@ Entities are created **conditionally based on the detected BLE protocol**. Only 
 | Climate | `climate.diesel_heater` | Thermostat control (8-36°C), presets (Away, Comfort) |
 | Fan | `fan.diesel_heater_heater_level` | Level control as fan entity (1-10) |
 | Switch | `switch.diesel_heater_power` | Simple ON/OFF control |
+| Switch | `switch.diesel_heater_burnoff_on_shutdown` | Max-power soot burn-off before shutdown (off by default) *(Config)* |
 | Switch | `switch.diesel_heater_auto_offset` | Auto Temperature Offset toggle *(Config)* |
 | Select | `select.diesel_heater_running_mode` | Mode selector (Off, Level, Temperature) |
 | Number | `number.diesel_heater_level` | Set heater power level (1-10) |
 | Number | `number.diesel_heater_target_temperature` | Set target temperature (8-36°C) |
 | Number | `number.diesel_heater_tank_capacity` | Set tank capacity for fuel estimation *(Config)* |
+| Number | `number.diesel_heater_burnoff_duration` | Burn-off duration in minutes (1-30, default 10) *(Config)* |
 | Button | `button.diesel_heater_sync_time` | Sync heater clock with HA time *(Config)* |
 | Button | `button.diesel_heater_reset_est_fuel_remaining` | Reset estimated fuel after refuel *(Config)* |
+| Button | `button.diesel_heater_power_off_now` | Skip burn-off and power off immediately *(Config)* |
+| Button | `button.diesel_heater_run_burnoff` | Run max-power burn-off without shutting down *(Config)* |
 | Sensor | Case Temperature, Interior Temperature, Voltage, Running Step/Mode, Set Level, Altitude, Error Code | Basic heater sensors |
 | Sensor | Estimated Hourly/Daily/Total Fuel, Fuel Remaining, Fuel Since Refuel | Fuel tracking (computed locally) |
 | Sensor | Daily/Total Runtime, History sensors | Runtime tracking (computed locally) |
 | Binary Sensor | Active, Problem, Connected | Heater status sensors *(Diagnostic)* |
+| Binary Sensor | Burn-off Active | Whether a max-power burn-off cycle is running *(Diagnostic)* |
+| Sensor | Burn-off Remaining | Seconds remaining in the current burn-off cycle *(Diagnostic)* |
 
 #### Extended Entities (AA55 Encrypted, AA66 Encrypted, CBFF)
 
@@ -593,6 +608,19 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
 | 44-45 | Remaining Run Time | uint16 LE, 65535=N/A |
 
 ## Changelog
+
+### Version 2.1.5-beta.2
+- **Burn-off on Shutdown**: Before power-off, the heater can run at maximum power to burn off soot
+  - Configurable duration (default 10 minutes, range 1-30)
+  - Previous heating mode (Temperature vs Level) and setpoint are restored immediately before the real off command
+  - Enable/disable via `switch.*_burnoff_on_shutdown` (off by default)
+  - Duration via `number.*_burnoff_duration` (default 10 minutes)
+  - `button.*_power_off_now` skips burn-off and turns the heater off immediately
+  - `button.*_run_burnoff` runs max power without shutting down (e.g. weekly clean)
+  - In-progress burn-off survives Home Assistant restart
+  - Turning the heater on during burn-off cancels the delayed off and restores the previous mode
+  - Skipped when the heater is already off, in ECU cooldown, or in ventilation mode
+  - **Limitation**: ECU Auto Start/Stop full stops cannot be intercepted; those shutdowns skip burn-off
 
 ### Version 2.1.4 (Latest)
 - **Hcalory Protocol Improvements** (95% completion)

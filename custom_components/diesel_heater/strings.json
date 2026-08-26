@@ -156,6 +156,9 @@
       },
       "protocol": {
         "name": "Protocol"
+      },
+      "burnoff_remaining": {
+        "name": "Burn-off Remaining"
       }
     },
     "binary_sensor": {
@@ -170,6 +173,9 @@
       },
       "auto_start_stop_sensor": {
         "name": "Auto Start/Stop"
+      },
+      "burnoff_active": {
+        "name": "Burn-off Active"
       }
     },
     "climate": {
@@ -197,6 +203,9 @@
       },
       "current_fuel_level": {
         "name": "Current Fuel Level"
+      },
+      "burnoff_duration": {
+        "name": "Burn-off Duration"
       }
     },
     "select": {
@@ -234,6 +243,9 @@
       },
       "high_altitude": {
         "name": "High Altitude Mode"
+      },
+      "burnoff_on_shutdown": {
+        "name": "Burn-off on Shutdown"
       }
     },
     "button": {
@@ -242,6 +254,12 @@
       },
       "reset_est_fuel_remaining": {
         "name": "Reset Estimated Fuel Remaining"
+      },
+      "power_off_now": {
+        "name": "Power Off Now"
+      },
+      "run_burnoff": {
+        "name": "Run Burn-off"
       }
     }
   }
