@@ -4208,6 +4208,20 @@ class TestBurnoffOnShutdown:
         coordinator._send_command.assert_called_once_with(3, 0)
 
     @pytest.mark.asyncio
+    async def test_default_disabled_skips_burnoff(self):
+        """Burn-off is off by default when the config key is unset."""
+        coordinator = create_mock_coordinator()
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
+        coordinator._send_command = AsyncMock(return_value=True)
+
+        assert coordinator.burnoff_enabled is False
+        await coordinator.async_turn_off()
+
+        assert coordinator.burnoff_active is False
+        coordinator._send_command.assert_called_once_with(3, 0)
+
+    @pytest.mark.asyncio
     async def test_duplicate_off_is_ignored(self):
         """A second off while burn-off is waiting is ignored."""
         coordinator = create_mock_coordinator()

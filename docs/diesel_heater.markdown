@@ -131,7 +131,7 @@ Additional sensors for specific protocols:
 | Switch | Description |
 |--------|-------------|
 | Power | Turn heater on/off |
-| Burn-off on Shutdown | Run at max power before shutdown to burn off soot |
+| Burn-off on Shutdown | Run at max power before shutdown to burn off soot (off by default) |
 | Auto Temperature Offset | Enable automatic offset using external sensor |
 | Auto Start/Stop | Enable automatic temperature control with full stop |
 | Fahrenheit Mode | Use Fahrenheit for temperature display |
@@ -224,7 +224,7 @@ Temperature control only works in **Temperature Mode**. Check the Running Mode s
 
 ### Burn-off on shutdown
 
-Turning the heater off can first run at maximum power (default 10 minutes) to burn off soot. The previous heating mode is restored before the real off command. Use **Power Off Now** to skip this. ECU Auto Start/Stop shutdowns cannot be intercepted and skip burn-off.
+Turning the heater off can first run at maximum power (default 10 minutes) to burn off soot. This is off by default; enable `switch.*_burnoff_on_shutdown`. The previous heating mode is restored before the real off command. Use **Power Off Now** to skip this. ECU Auto Start/Stop shutdowns cannot be intercepted and skip burn-off.
 
 ### Commands not responding
 

@@ -184,9 +184,9 @@ logger:
 
 ### Burn-off on Shutdown
 
-When you turn the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10.
+When you turn the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10. Burn-off is **off by default**.
 
-- Disable with `switch.*_burnoff_on_shutdown` or set duration to skip via **Power Off Now**
+- Enable with `switch.*_burnoff_on_shutdown`; skip a cycle with **Power Off Now**
 - Turning the heater back on during burn-off cancels the delayed off and restores the previous mode
 - **Limitation:** ECU Auto Start/Stop can shut the heater down on its own (±2°C). Home Assistant cannot intercept those shutdowns, so they skip burn-off
 
@@ -247,7 +247,7 @@ Entities are created **conditionally based on the detected BLE protocol**. Only 
 | Climate | `climate.diesel_heater` | Thermostat control (8-36°C), presets (Away, Comfort) |
 | Fan | `fan.diesel_heater_heater_level` | Level control as fan entity (1-10) |
 | Switch | `switch.diesel_heater_power` | Simple ON/OFF control |
-| Switch | `switch.diesel_heater_burnoff_on_shutdown` | Max-power soot burn-off before shutdown *(Config)* |
+| Switch | `switch.diesel_heater_burnoff_on_shutdown` | Max-power soot burn-off before shutdown (off by default) *(Config)* |
 | Switch | `switch.diesel_heater_auto_offset` | Auto Temperature Offset toggle *(Config)* |
 | Select | `select.diesel_heater_running_mode` | Mode selector (Off, Level, Temperature) |
 | Number | `number.diesel_heater_level` | Set heater power level (1-10) |
@@ -613,7 +613,7 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
 - **Burn-off on Shutdown**: Before power-off, the heater can run at maximum power to burn off soot
   - Configurable duration (default 10 minutes, range 1-30)
   - Previous heating mode (Temperature vs Level) and setpoint are restored immediately before the real off command
-  - Enable/disable via `switch.*_burnoff_on_shutdown` (on by default)
+  - Enable/disable via `switch.*_burnoff_on_shutdown` (off by default)
   - Duration via `number.*_burnoff_duration` (default 10 minutes)
   - `button.*_power_off_now` skips burn-off and turns the heater off immediately
   - `button.*_run_burnoff` runs max power without shutting down (e.g. weekly clean)

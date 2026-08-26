@@ -35,7 +35,7 @@ def create_mock_coordinator() -> MagicMock:
     coordinator.async_set_altitude_unit = AsyncMock()
     coordinator.async_set_high_altitude = AsyncMock()
     coordinator.async_set_burnoff_enabled = AsyncMock()
-    coordinator.burnoff_enabled = True
+    coordinator.burnoff_enabled = False
     coordinator._is_abba_device = False
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.data = {"external_temp_sensor": "sensor.test"}
