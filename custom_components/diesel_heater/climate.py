@@ -98,6 +98,16 @@ class VevorHeaterClimate(CoordinatorEntity[VevorHeaterCoordinator], ClimateEntit
             self._attr_target_temperature_step = 1.0  # 1°C step (40 possible values)
 
     @property
+    def supported_features(self) -> ClimateEntityFeature:
+        """Hide target temperature and presets during burn-off.
+
+        HVAC on/off stay available so Heat can cancel the cycle.
+        """
+        if self.coordinator.burnoff_active:
+            return ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON
+        return self._attr_supported_features
+
+    @property
     def current_temperature(self) -> float | None:
         """Return the current temperature (interior/cabin temperature)."""
         return self.coordinator.data.get("cab_temperature")
