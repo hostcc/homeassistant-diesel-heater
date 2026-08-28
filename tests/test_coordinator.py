@@ -21,9 +21,11 @@ from custom_components.diesel_heater.const import (
     RUNNING_MODE_LEVEL,
     RUNNING_MODE_TEMPERATURE,
     RUNNING_MODE_VENTILATION,
+    RUNNING_STATE_OFF,
     RUNNING_STATE_ON,
     RUNNING_STEP_COOLDOWN,
     RUNNING_STEP_RUNNING,
+    RUNNING_STEP_STANDBY,
     RUNNING_STEP_VENTILATION,
     STORAGE_KEY_TOTAL_FUEL,
     STORAGE_KEY_DAILY_FUEL,
@@ -4371,3 +4373,127 @@ class TestBurnoffOnShutdown:
         await coordinator.async_turn_off()
 
         coordinator._send_command.assert_not_called()
+
+    def _active_burnoff(self, coordinator) -> None:
+        """Mark burn-off as in progress with a saved Temperature setpoint."""
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_RUNNING
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._burnoff_active = True
+        coordinator._burnoff_shutdown_after = True
+        coordinator._burnoff_saved_mode = RUNNING_MODE_TEMPERATURE
+        coordinator._burnoff_saved_temp = 21
+        coordinator._burnoff_task = asyncio.create_task(asyncio.sleep(60))
+
+    @pytest.mark.asyncio
+    async def test_external_cooldown_aborts_burnoff_and_restores(self):
+        """ECU cooldown during burn-off restores mode and does not power off."""
+        coordinator = create_mock_coordinator()
+        self._active_burnoff(coordinator)
+        coordinator.data["running_step"] = RUNNING_STEP_COOLDOWN
+
+        await coordinator._abort_burnoff_on_external_shutdown()
+
+        assert coordinator.burnoff_active is False
+        commands = [call[0] for call in coordinator._send_command.call_args_list]
+        assert (2, RUNNING_MODE_TEMPERATURE) in commands
+        assert (4, 21) in commands
+        assert (3, 0) not in commands
+
+    @pytest.mark.asyncio
+    async def test_external_off_aborts_burnoff_and_restores(self):
+        """ECU off during burn-off restores mode and does not power off."""
+        coordinator = create_mock_coordinator()
+        self._active_burnoff(coordinator)
+        coordinator.data["running_state"] = RUNNING_STATE_OFF
+
+        await coordinator._abort_burnoff_on_external_shutdown()
+
+        assert coordinator.burnoff_active is False
+        commands = [call[0] for call in coordinator._send_command.call_args_list]
+        assert (2, RUNNING_MODE_TEMPERATURE) in commands
+        assert (4, 21) in commands
+        assert (3, 0) not in commands
+
+    @pytest.mark.asyncio
+    async def test_abort_skipped_while_still_running(self):
+        """Burn-off continues when the heater is still ON and heating."""
+        coordinator = create_mock_coordinator()
+        self._active_burnoff(coordinator)
+        task = coordinator._burnoff_task
+
+        try:
+            await coordinator._abort_burnoff_on_external_shutdown()
+
+            assert coordinator.burnoff_active is True
+            coordinator._send_command.assert_not_called()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_abort_skipped_when_on_and_standby(self):
+        """Auto Start/Stop idle (ON + standby) does not abort burn-off."""
+        coordinator = create_mock_coordinator()
+        self._active_burnoff(coordinator)
+        coordinator.data["running_step"] = RUNNING_STEP_STANDBY
+        task = coordinator._burnoff_task
+
+        try:
+            await coordinator._abort_burnoff_on_external_shutdown()
+
+            assert coordinator.burnoff_active is True
+            coordinator._send_command.assert_not_called()
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    @pytest.mark.asyncio
+    async def test_duplicate_abort_does_not_restore_twice(self):
+        """A second abort after cancel does not send another restore."""
+        coordinator = create_mock_coordinator()
+        self._active_burnoff(coordinator)
+        coordinator.data["running_step"] = RUNNING_STEP_COOLDOWN
+
+        await coordinator._abort_burnoff_on_external_shutdown()
+        coordinator._send_command.reset_mock()
+
+        await coordinator._abort_burnoff_on_external_shutdown()
+
+        coordinator._send_command.assert_not_called()
+        assert coordinator.burnoff_active is False
+
+    def test_schedule_abort_on_cooldown(self):
+        """Successful cooldown parse schedules one abort task and sets cancel."""
+        coordinator = create_mock_coordinator()
+        coordinator._burnoff_active = True
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_COOLDOWN
+        created: list = []
+
+        def _create_task(coro):
+            created.append(coro)
+            coro.close()
+            return coro
+
+        coordinator.hass.async_create_task = _create_task
+
+        coordinator._schedule_burnoff_abort_if_ecu_stopped()
+
+        assert len(created) == 1
+        assert coordinator._burnoff_cancel_event.is_set()
+
+    def test_schedule_abort_skipped_when_cancel_event_set(self):
+        """Already-cancelled burn-off does not spawn another abort task."""
+        coordinator = create_mock_coordinator()
+        coordinator._burnoff_active = True
+        coordinator._burnoff_cancel_event.set()
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_COOLDOWN
+
+        coordinator._schedule_burnoff_abort_if_ecu_stopped()
+
+        coordinator.hass.async_create_task.assert_not_called()

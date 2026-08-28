@@ -184,11 +184,13 @@ logger:
 
 ### Burn-off on Shutdown
 
-When you turn the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10. Burn-off is **off by default**.
+When Home Assistant turns the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10. Burn-off is **off by default**.
 
 - Enable with `switch.*_burnoff_on_shutdown`; skip a cycle with **Power Off Now**
-- Turning the heater back on during burn-off cancels the delayed off and restores the previous mode
-- **Limitation:** ECU Auto Start/Stop can shut the heater down on its own (±2°C). Home Assistant cannot intercept those shutdowns, so they skip burn-off
+- Burn-off starts only when Home Assistant turns the heater off (climate, power switch, or fan)
+- Turning the heater back on in Home Assistant during burn-off cancels the delayed off and restores the previous mode
+- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle, restores the previous mode/setpoint, and does not send another off
+- **Limitation:** the physical LCD/controller and ECU Auto Start/Stop (±2°C full stop) talk to the ECU directly. Home Assistant cannot intercept those shutdowns, so they **do not start** burn-off. The LCD is also not locked during an HA burn-off; it can still change level/mode or start cooldown. Restore commands sent during ECU cooldown may be ignored on some heaters, so the next start could still be Level 10
 
 ## Finding Your Heater's MAC Address
 
@@ -619,8 +621,9 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
   - `button.*_run_burnoff` runs max power without shutting down (e.g. weekly clean)
   - In-progress burn-off survives Home Assistant restart
   - Turning the heater on during burn-off cancels the delayed off and restores the previous mode
+  - If the physical controller or ECU Auto Start/Stop shuts the heater down during an in-progress burn-off, the cycle is cancelled, the previous mode is restored, and no extra off command is sent
   - Skipped when the heater is already off, in ECU cooldown, or in ventilation mode
-  - **Limitation**: ECU Auto Start/Stop full stops cannot be intercepted; those shutdowns skip burn-off
+  - **Limitation**: burn-off starts only from Home Assistant (climate, power switch, fan). Physical controller offs and ECU Auto Start/Stop full stops cannot be intercepted, so they do not start burn-off. The LCD is not locked during burn-off. Restore during ECU cooldown may be ignored on some heaters
 
 ### Version 2.1.4 (Latest)
 - **Hcalory Protocol Improvements** (95% completion)
