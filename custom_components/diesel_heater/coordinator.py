@@ -1556,6 +1556,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 old_mode, self._protocol_mode, protocol.name
             )
 
+        self._schedule_burnoff_abort_if_ecu_stopped()
+
     def _apply_ui_temperature_offset(self) -> None:
         """Apply HA-side UI temperature offset (display only, not sent to heater).
 
@@ -2058,6 +2060,39 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         if self.data.get("running_mode") == RUNNING_MODE_VENTILATION:
             return False
         return True
+
+    def _ecu_shutdown_observed(self) -> bool:
+        """Return True if status shows the ECU has begun shutdown."""
+        if self.data.get("running_state") != RUNNING_STATE_ON:
+            return True
+        return self.data.get("running_step") == RUNNING_STEP_COOLDOWN
+
+    def _schedule_burnoff_abort_if_ecu_stopped(self) -> None:
+        """Abort burn-off if a successful status parse shows ECU shutdown.
+
+        Only call after a successful parse. The parse-error path forces
+        running_state=0 and must not be treated as a real off.
+        """
+        if not self._burnoff_active:
+            return
+        if self._burnoff_cancel_event.is_set():
+            return
+        if not self._ecu_shutdown_observed():
+            return
+        # Stop the wait loop immediately and prevent duplicate abort tasks.
+        self._burnoff_cancel_event.set()
+        self.hass.async_create_task(self._abort_burnoff_on_external_shutdown())
+
+    async def _abort_burnoff_on_external_shutdown(self) -> None:
+        """Cancel burn-off when the ECU stopped outside Home Assistant."""
+        if not self._burnoff_active:
+            return
+        if not self._ecu_shutdown_observed():
+            return
+        self._logger.info(
+            "Burn-off aborted: heater stopped externally (controller or ECU)"
+        )
+        await self._cancel_burnoff(restore=True)
 
     def _schedule_burnoff_wait(self) -> None:
         """Schedule the burn-off wait task on the running event loop."""
