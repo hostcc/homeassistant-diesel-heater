@@ -315,6 +315,11 @@ class _StubClimateEntity(_StubEntity):
     _attr_hvac_modes = []
     _attr_current_temperature = None
     _attr_target_temperature = None
+    _attr_supported_features = 0
+
+    @property
+    def supported_features(self):
+        return getattr(self, "_attr_supported_features", 0)
 
 
 class _StubFanEntity(_StubEntity):

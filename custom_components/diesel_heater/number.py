@@ -90,9 +90,14 @@ class VevorHeaterLevelNumber(CoordinatorEntity[VevorHeaterCoordinator], NumberEn
 
         Level entity is only available when NOT in Temperature mode (mode 1).
         In Temperature mode, level commands are ignored by the heater.
+        Locked while burn-off is active: set_level is snapshotted at start
+        and restored afterwards.
         """
         # First check coordinator availability
         if not super().available:
+            return False
+
+        if self.coordinator.burnoff_active:
             return False
 
         # Check if in Temperature mode (RUNNING_MODE_TEMPERATURE = 1)
@@ -176,9 +181,14 @@ class VevorHeaterTemperatureNumber(
 
         Temperature entity is only available when NOT in Level mode (mode 2).
         In Level mode, temperature commands are ignored by the heater.
+        Locked while burn-off is active: set_temp is snapshotted at start
+        and restored afterwards.
         """
         # First check coordinator availability
         if not super().available:
+            return False
+
+        if self.coordinator.burnoff_active:
             return False
 
         # Check if in Level mode (RUNNING_MODE_LEVEL = 2)

@@ -4336,6 +4336,30 @@ class TestBurnoffOnShutdown:
         coordinator._send_command.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_ignores_set_mode_during_burnoff(self):
+        """User mode changes are ignored while burn-off is active."""
+        coordinator = create_mock_coordinator()
+        coordinator._burnoff_active = True
+        coordinator._burnoff_applying = False
+        coordinator._send_command = AsyncMock(return_value=True)
+
+        await coordinator.async_set_mode(RUNNING_MODE_TEMPERATURE)
+
+        coordinator._send_command.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ignores_set_temperature_during_burnoff(self):
+        """User temperature changes are ignored while burn-off is active."""
+        coordinator = create_mock_coordinator()
+        coordinator._burnoff_active = True
+        coordinator._burnoff_applying = False
+        coordinator._send_command = AsyncMock(return_value=True)
+
+        await coordinator.async_set_temperature(22)
+
+        coordinator._send_command.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_abba_does_not_toggle_during_burnoff(self):
         """ABBA off during burn-off is ignored so the toggle is not sent."""
         coordinator = create_mock_coordinator()

@@ -15,6 +15,10 @@ from custom_components.diesel_heater.number import (
     VevorBurnoffDurationNumber,
     async_setup_entry,
 )
+from custom_components.diesel_heater.const import (
+    RUNNING_MODE_LEVEL,
+    RUNNING_MODE_TEMPERATURE,
+)
 
 
 def create_mock_coordinator(protocol_mode: int = 0) -> MagicMock:
@@ -31,6 +35,7 @@ def create_mock_coordinator(protocol_mode: int = 0) -> MagicMock:
     coordinator.async_set_tank_capacity = AsyncMock()
     coordinator.async_set_burnoff_duration = AsyncMock()
     coordinator.burnoff_duration_minutes = 10
+    coordinator.burnoff_active = False
     coordinator.protocol_mode = protocol_mode
     coordinator._heater_uses_fahrenheit = False
     coordinator.data = {
@@ -163,6 +168,46 @@ class TestNumberAvailability:
 
         # Just verify property is accessible
         _ = number.available
+
+    def test_level_unavailable_during_burnoff(self):
+        """Level is a burn-off snapshot field and must be locked."""
+        coordinator = create_mock_coordinator()
+        coordinator.data["connected"] = True
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator.burnoff_active = True
+        number = VevorHeaterLevelNumber(coordinator)
+
+        assert number.available is False
+
+    def test_level_available_when_burnoff_inactive(self):
+        """Level stays available in Level mode when burn-off is not running."""
+        coordinator = create_mock_coordinator()
+        coordinator.data["connected"] = True
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator.burnoff_active = False
+        number = VevorHeaterLevelNumber(coordinator)
+
+        assert number.available is True
+
+    def test_temperature_unavailable_during_burnoff(self):
+        """Target temperature is a burn-off snapshot field and must be locked."""
+        coordinator = create_mock_coordinator()
+        coordinator.data["connected"] = True
+        coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
+        coordinator.burnoff_active = True
+        number = VevorHeaterTemperatureNumber(coordinator)
+
+        assert number.available is False
+
+    def test_temperature_available_when_burnoff_inactive(self):
+        """Target temperature stays available in Temperature mode when idle."""
+        coordinator = create_mock_coordinator()
+        coordinator.data["connected"] = True
+        coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
+        coordinator.burnoff_active = False
+        number = VevorHeaterTemperatureNumber(coordinator)
+
+        assert number.available is True
 
 
 # ---------------------------------------------------------------------------
