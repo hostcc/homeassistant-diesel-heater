@@ -101,7 +101,8 @@ class VevorHeaterClimate(CoordinatorEntity[VevorHeaterCoordinator], ClimateEntit
     def supported_features(self) -> ClimateEntityFeature:
         """Hide target temperature and presets during burn-off.
 
-        HVAC on/off stay available so Heat can cancel the cycle.
+        HVAC on/off stay available so Heat can cancel the cycle and Off can
+        skip remaining burn-off (restore snapshot, then power off).
         """
         if self.coordinator.burnoff_active:
             return ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON

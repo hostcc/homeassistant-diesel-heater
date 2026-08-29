@@ -232,12 +232,12 @@ class TestButtonAttributes:
         # EntityCategory.CONFIG is mocked
         assert button._attr_entity_category is not None
 
-    def test_reset_fuel_entity_category(self):
-        """Test reset fuel button is in CONFIG category."""
+    def test_power_off_now_is_not_hidden_as_config(self):
+        """Power Off Now must stay visible so users can skip remaining burn-off."""
         coordinator = create_mock_coordinator()
-        button = VevorResetFuelLevelButton(coordinator)
+        button = VevorPowerOffNowButton(coordinator)
 
-        assert button._attr_entity_category is not None
+        assert getattr(button, "_attr_entity_category", None) is None
 
     def test_time_sync_device_info(self):
         """Test time sync button device_info."""

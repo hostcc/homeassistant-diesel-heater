@@ -97,7 +97,6 @@ class VevorPowerOffNowButton(CoordinatorEntity[VevorHeaterCoordinator], ButtonEn
     _attr_has_entity_name = True
     _attr_name = "Power Off Now"
     _attr_icon = "mdi:power-off"
-    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
         """Initialize the button."""

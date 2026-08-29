@@ -186,11 +186,14 @@ logger:
 
 When Home Assistant turns the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10. Burn-off is **off by default**.
 
-- Enable with `switch.*_burnoff_on_shutdown`; skip a cycle with **Power Off Now**
-- Burn-off starts only when Home Assistant turns the heater off (climate, power switch, or fan)
+- Enable with `switch.*_burnoff_on_shutdown`; skip a cycle with **Power Off Now**, or tap Off during an in-progress cycle
+- Burn-off starts only when Home Assistant turns the heater off while it is actually heating (self-test, ignition, or running). Auto Start/Stop idle (ON + standby) goes straight to power-off
 - Turning the heater back on in Home Assistant during burn-off cancels the delayed off and restores the previous mode
-- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle, restores the previous mode/setpoint, and does not send another off
-- **Limitation:** the physical LCD/controller and ECU Auto Start/Stop (±2°C full stop) talk to the ECU directly. Home Assistant cannot intercept those shutdowns, so they **do not start** burn-off. The LCD is also not locked during an HA burn-off; it can still change level/mode or start cooldown. Restore commands sent during ECU cooldown may be ignored on some heaters, so the next start could still be Level 10
+- Off during burn-off skips remaining time, restores the previous mode, and powers off
+- Disabling `switch.*_burnoff_on_shutdown` during a cycle restores the previous mode and keeps heating
+- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle and does **not** send another off. Restore is deferred until cooldown ends (or the next HA turn-on), because many ECUs ignore mode/setpoint writes during cooldown
+- After a Home Assistant restart, burn-off waits for a live ECU status before completing: it re-applies max power if still heating, or defers restore if the ECU already stopped
+- **Limitation:** the physical LCD/controller and ECU Auto Start/Stop (±2°C full stop) talk to the ECU directly. Home Assistant cannot intercept those shutdowns, so they **do not start** burn-off. The LCD is also not locked during an HA burn-off; it can still change level/mode or start cooldown
 
 ## Finding Your Heater's MAC Address
 
@@ -258,7 +261,7 @@ Entities are created **conditionally based on the detected BLE protocol**. Only 
 | Number | `number.diesel_heater_burnoff_duration` | Burn-off duration in minutes (1-30, default 10) *(Config)* |
 | Button | `button.diesel_heater_sync_time` | Sync heater clock with HA time *(Config)* |
 | Button | `button.diesel_heater_reset_est_fuel_remaining` | Reset estimated fuel after refuel *(Config)* |
-| Button | `button.diesel_heater_power_off_now` | Skip burn-off and power off immediately *(Config)* |
+| Button | `button.diesel_heater_power_off_now` | Skip burn-off and power off immediately |
 | Button | `button.diesel_heater_run_burnoff` | Run max-power burn-off without shutting down *(Config)* |
 | Sensor | Case Temperature, Interior Temperature, Voltage, Running Step/Mode, Set Level, Altitude, Error Code | Basic heater sensors |
 | Sensor | Estimated Hourly/Daily/Total Fuel, Fuel Remaining, Fuel Since Refuel | Fuel tracking (computed locally) |
@@ -610,6 +613,16 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
 | 44-45 | Remaining Run Time | uint16 LE, 65535=N/A |
 
 ## Changelog
+
+### Version 2.1.5-beta.3
+- **Burn-off lifecycle**: Start only while actually heating; do not re-ignite from Auto Start/Stop idle
+- Off during burn-off now skips remaining time, restores the snapshot, and powers off
+- **Power Off Now** is no longer a hidden config entity
+- External ECU cooldown no longer restores immediately (writes often do not stick); restore is deferred until cooldown ends or the next HA turn-on
+- Snapshot is kept if restore BLE writes fail, and is not discarded until restore succeeds
+- Completing the timer does not send a second off if the ECU is already in cooldown (avoids ABBA toggle-on)
+- After HA restart, wait for live ECU status before completing: re-apply max power if still heating
+- Disabling the burn-off switch mid-cycle restores the previous mode and keeps heating
 
 ### Version 2.1.5-beta.2
 - **Burn-off on Shutdown**: Before power-off, the heater can run at maximum power to burn off soot
