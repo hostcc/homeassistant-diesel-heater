@@ -187,8 +187,8 @@ def create_mock_coordinator() -> VevorHeaterCoordinator:
     coordinator._burnoff_saved_level = None
     coordinator._burnoff_saved_temp = None
     coordinator._burnoff_applying = False
-    coordinator._burnoff_restore_pending = False
-    coordinator._burnoff_resume_pending = False
+    coordinator._burnoff_awaiting_snapshot_write = False
+    coordinator._burnoff_awaiting_first_status_after_reload = False
     coordinator.data["burnoff_active"] = False
     coordinator.data["burnoff_remaining"] = None
 
@@ -4409,8 +4409,8 @@ class TestBurnoffOnShutdown:
         coordinator._burnoff_shutdown_after = True
         coordinator._burnoff_saved_mode = RUNNING_MODE_TEMPERATURE
         coordinator._burnoff_saved_temp = 21
-        coordinator._burnoff_restore_pending = False
-        coordinator._burnoff_resume_pending = False
+        coordinator._burnoff_awaiting_snapshot_write = False
+        coordinator._burnoff_awaiting_first_status_after_reload = False
         coordinator._burnoff_task = asyncio.create_task(asyncio.sleep(60))
 
     @pytest.mark.asyncio
@@ -4424,7 +4424,7 @@ class TestBurnoffOnShutdown:
 
         coordinator._send_command.assert_not_called()
         assert coordinator._burnoff_saved_mode == RUNNING_MODE_TEMPERATURE
-        assert coordinator._burnoff_restore_pending is True
+        assert coordinator._burnoff_awaiting_snapshot_write is True
         assert coordinator.burnoff_active is True
 
     @pytest.mark.asyncio
@@ -4491,7 +4491,7 @@ class TestBurnoffOnShutdown:
 
         coordinator._send_command.assert_not_called()
         assert coordinator._burnoff_saved_mode == RUNNING_MODE_TEMPERATURE
-        assert coordinator._burnoff_restore_pending is True
+        assert coordinator._burnoff_awaiting_snapshot_write is True
 
     def test_schedule_abort_on_cooldown(self):
         """Successful cooldown parse schedules one abort task and sets cancel."""
@@ -4588,7 +4588,7 @@ class TestBurnoffOnShutdown:
         commands = [call[0] for call in coordinator._send_command.call_args_list]
         assert (3, 0) not in commands
         assert coordinator._burnoff_saved_mode == RUNNING_MODE_TEMPERATURE
-        assert coordinator._burnoff_restore_pending is True
+        assert coordinator._burnoff_awaiting_snapshot_write is True
         assert coordinator.burnoff_active is True
 
     @pytest.mark.asyncio
@@ -4605,7 +4605,7 @@ class TestBurnoffOnShutdown:
         await coordinator._complete_burnoff()
 
         assert coordinator._burnoff_saved_mode == RUNNING_MODE_TEMPERATURE
-        assert coordinator._burnoff_restore_pending is True
+        assert coordinator._burnoff_awaiting_snapshot_write is True
         assert coordinator.burnoff_active is True
         assert (3, 0) not in [
             call[0] for call in coordinator._send_command.call_args_list
@@ -4622,14 +4622,14 @@ class TestBurnoffOnShutdown:
 
         coordinator.data["running_state"] = RUNNING_STATE_OFF
         coordinator.data["running_step"] = RUNNING_STEP_STANDBY
-        await coordinator._try_pending_restore()
+        await coordinator._try_snapshot_write()
 
         commands = [call[0] for call in coordinator._send_command.call_args_list]
         assert (2, RUNNING_MODE_TEMPERATURE) in commands
         assert (4, 21) in commands
         assert (3, 0) not in commands
         assert coordinator.burnoff_active is False
-        assert coordinator._burnoff_restore_pending is False
+        assert coordinator._burnoff_awaiting_snapshot_write is False
 
     @pytest.mark.asyncio
     async def test_turn_on_applies_pending_restore_after_cooldown_abort(self):
@@ -4669,7 +4669,7 @@ class TestBurnoffOnShutdown:
         await coordinator._load_burnoff_state(payload)
 
         assert coordinator.burnoff_active is True
-        assert coordinator._burnoff_resume_pending is True
+        assert coordinator._burnoff_awaiting_first_status_after_reload is True
         coordinator._schedule_burnoff_wait.assert_not_called()
         coordinator._complete_burnoff.assert_not_called()
 
@@ -4681,7 +4681,7 @@ class TestBurnoffOnShutdown:
         coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
         coordinator._send_command = AsyncMock(return_value=True)
         coordinator._burnoff_active = True
-        coordinator._burnoff_resume_pending = True
+        coordinator._burnoff_awaiting_first_status_after_reload = True
         coordinator._burnoff_ends_at = datetime.now(timezone.utc) + timedelta(minutes=5)
         coordinator._schedule_burnoff_wait = MagicMock()
 
@@ -4700,7 +4700,7 @@ class TestBurnoffOnShutdown:
         commands = [call[0] for call in coordinator._send_command.call_args_list]
         assert (2, RUNNING_MODE_LEVEL) in commands
         assert (4, MAX_LEVEL) in commands
-        assert coordinator._burnoff_resume_pending is False
+        assert coordinator._burnoff_awaiting_first_status_after_reload is False
 
     @pytest.mark.asyncio
     async def test_resume_expired_completes_after_heating_status(self):
@@ -4710,7 +4710,7 @@ class TestBurnoffOnShutdown:
         coordinator._send_command = AsyncMock(return_value=True)
         coordinator._burnoff_active = True
         coordinator._burnoff_shutdown_after = True
-        coordinator._burnoff_resume_pending = True
+        coordinator._burnoff_awaiting_first_status_after_reload = True
         coordinator._burnoff_saved_mode = RUNNING_MODE_LEVEL
         coordinator._burnoff_saved_level = 3
         coordinator._burnoff_ends_at = datetime.now(timezone.utc) - timedelta(seconds=1)

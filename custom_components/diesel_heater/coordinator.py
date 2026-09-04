@@ -247,8 +247,10 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._burnoff_saved_level: int | None = None
         self._burnoff_saved_temp: float | None = None
         self._burnoff_applying = False
-        self._burnoff_restore_pending = False
-        self._burnoff_resume_pending = False
+        # Cycle ended; still need to write saved mode/level/temp when the ECU will accept it.
+        self._burnoff_awaiting_snapshot_write = False
+        # Cycle still running, but wait for live ECU status (HA reload or failed max-power write).
+        self._burnoff_awaiting_first_status_after_reload = False
         self.data["burnoff_active"] = False
         self.data["burnoff_remaining"] = None
 
@@ -1988,7 +1990,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             "saved_mode": self._burnoff_saved_mode,
             "saved_level": self._burnoff_saved_level,
             "saved_temp": self._burnoff_saved_temp,
-            "restore_pending": self._burnoff_restore_pending,
+            "awaiting_snapshot_write": self._burnoff_awaiting_snapshot_write,
         }
 
     async def _load_burnoff_state(self, burnoff: dict[str, Any] | None) -> None:
@@ -2001,7 +2003,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._burnoff_saved_mode = burnoff.get("saved_mode")
         self._burnoff_saved_level = burnoff.get("saved_level")
         self._burnoff_saved_temp = burnoff.get("saved_temp")
-        self._burnoff_restore_pending = bool(burnoff.get("restore_pending", False))
+        self._burnoff_awaiting_snapshot_write = bool(
+            burnoff.get("awaiting_snapshot_write", burnoff.get("restore_pending", False))
+        )
 
         ends_at = burnoff.get("ends_at")
         parsed: datetime | None = None
@@ -2018,16 +2022,17 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
         remaining = self.burnoff_remaining_seconds
         self._logger.info(
-            "Resuming in-progress burn-off (remaining=%ss, shutdown_after=%s, restore_pending=%s)",
+            "Resuming in-progress burn-off (remaining=%ss, shutdown_after=%s, "
+            "awaiting_snapshot_write=%s)",
             remaining,
             self._burnoff_shutdown_after,
-            self._burnoff_restore_pending,
+            self._burnoff_awaiting_snapshot_write,
         )
         self._notify_burnoff_state()
-        if self._burnoff_restore_pending:
-            self._burnoff_resume_pending = False
+        if self._burnoff_awaiting_snapshot_write:
+            self._burnoff_awaiting_first_status_after_reload = False
             return
-        self._burnoff_resume_pending = True
+        self._burnoff_awaiting_first_status_after_reload = True
         if remaining is not None and remaining > 0:
             self._schedule_burnoff_wait()
 
@@ -2092,13 +2097,17 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
         Only call after a successful parse. The parse-error path forces
         running_state=0 and must not be treated as a real off.
+
+        awaiting_snapshot_write: cycle ended; write the saved setpoint when safe.
+        awaiting_first_status_after_reload: cycle still running; re-apply max power
+        or complete the expired timer once live status is known.
         """
-        if not self._burnoff_active and not self._burnoff_restore_pending:
+        if not self._burnoff_active and not self._burnoff_awaiting_snapshot_write:
             return
 
-        if self._burnoff_restore_pending:
+        if self._burnoff_awaiting_snapshot_write:
             if self._ecu_can_restore():
-                self.hass.async_create_task(self._try_pending_restore())
+                self.hass.async_create_task(self._try_snapshot_write())
             return
 
         if self._ecu_shutdown_observed():
@@ -2108,8 +2117,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             self.hass.async_create_task(self._abort_burnoff_on_external_shutdown())
             return
 
-        if self._burnoff_resume_pending:
-            self._burnoff_resume_pending = False
+        if self._burnoff_awaiting_first_status_after_reload:
+            self._burnoff_awaiting_first_status_after_reload = False
             remaining = self.burnoff_remaining_seconds
             if remaining is None or remaining <= 0:
                 self.hass.async_create_task(self._complete_burnoff())
@@ -2202,23 +2211,23 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._burnoff_saved_mode = None
         self._burnoff_saved_level = None
         self._burnoff_saved_temp = None
-        self._burnoff_restore_pending = False
-        self._burnoff_resume_pending = False
+        self._burnoff_awaiting_snapshot_write = False
+        self._burnoff_awaiting_first_status_after_reload = False
         self._burnoff_task = None
         await self.async_save_data()
         self._notify_burnoff_state()
 
-    async def _keep_pending_restore(self) -> None:
-        """Keep the snapshot until restore commands can succeed."""
-        self._burnoff_restore_pending = True
+    async def _mark_awaiting_snapshot_write(self) -> None:
+        """Remember that the snapshot still needs to be written to the ECU."""
+        self._burnoff_awaiting_snapshot_write = True
         self._burnoff_shutdown_after = False
         await self.async_save_data()
         self._notify_burnoff_state()
 
-    async def _try_pending_restore(self) -> None:
-        """Apply a deferred snapshot restore when the ECU can accept settings."""
+    async def _try_snapshot_write(self) -> None:
+        """Write the saved mode/setpoint now that the ECU can accept settings."""
         async with self._burnoff_lock:
-            if not self._burnoff_restore_pending:
+            if not self._burnoff_awaiting_snapshot_write:
                 return
             if not self._ecu_can_restore():
                 return
@@ -2230,7 +2239,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         if (
             not self._burnoff_active
             and self._burnoff_task is None
-            and not self._burnoff_restore_pending
+            and not self._burnoff_awaiting_snapshot_write
         ):
             return
 
@@ -2243,13 +2252,13 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 await task
 
         async with self._burnoff_lock:
-            if not self._burnoff_active and not self._burnoff_restore_pending:
+            if not self._burnoff_active and not self._burnoff_awaiting_snapshot_write:
                 return
             if restore:
                 if self._ecu_can_restore() and await self._restore_saved_mode():
                     await self._clear_burnoff_state()
                     return
-                await self._keep_pending_restore()
+                await self._mark_awaiting_snapshot_write()
                 return
             await self._clear_burnoff_state()
 
@@ -2267,7 +2276,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 self._ecu_can_restore(),
             )
             if not self._ecu_can_restore() or not await self._restore_saved_mode():
-                await self._keep_pending_restore()
+                await self._mark_awaiting_snapshot_write()
                 return
             await self._clear_burnoff_state()
         if shutdown_after:
@@ -2313,8 +2322,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             self._burnoff_saved_level = self.data.get("set_level")
             self._burnoff_saved_temp = self.data.get("set_temp")
             self._burnoff_shutdown_after = shutdown_after
-            self._burnoff_restore_pending = False
-            self._burnoff_resume_pending = False
+            self._burnoff_awaiting_snapshot_write = False
+            self._burnoff_awaiting_first_status_after_reload = False
             self._burnoff_active = True
             duration = self.burnoff_duration_minutes
             self._burnoff_ends_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
@@ -2330,7 +2339,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             )
 
             if not await self._apply_max_power():
-                self._burnoff_resume_pending = True
+                # Same wait-for-status path as HA reload: next parse re-sends Level 10.
+                self._burnoff_awaiting_first_status_after_reload = True
             await self.async_save_data()
             self._notify_burnoff_state()
             self._schedule_burnoff_wait()
@@ -2369,7 +2379,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             return
 
         if self._burnoff_active:
-            if self._burnoff_restore_pending or self._ecu_shutdown_observed():
+            if self._burnoff_awaiting_snapshot_write or self._ecu_shutdown_observed():
                 await self._cancel_burnoff(restore=True)
                 return
             await self.async_turn_off(immediate=True)
