@@ -224,7 +224,7 @@ Temperature control only works in **Temperature Mode**. Check the Running Mode s
 
 ### Burn-off on shutdown
 
-Turning the heater off can first run at maximum power (default 10 minutes) to burn off soot. This is off by default; enable `switch.*_burnoff_on_shutdown`. The previous heating mode is restored before the real off command. Use **Power Off Now** to skip this. ECU Auto Start/Stop shutdowns cannot be intercepted and skip burn-off.
+Turning the heater off can first run at maximum power (default 10 minutes) to burn off soot. This is off by default; enable `switch.*_burnoff_on_shutdown`. Burn-off starts only while the heater is actually heating, not from Auto Start/Stop idle. The previous heating mode is restored before the real off command. Off during an in-progress cycle, or **Power Off Now**, skips remaining time. If the physical controller or Auto Start/Stop stops the heater during a cycle, Home Assistant cancels the wait and defers restore until cooldown ends (no extra off command). ECU Auto Start/Stop shutdowns still cannot *start* a burn-off.
 
 ### Commands not responding
 

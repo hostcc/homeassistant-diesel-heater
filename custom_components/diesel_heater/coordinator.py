@@ -68,8 +68,9 @@ from .const import (
     RUNNING_MODE_VENTILATION,
     RUNNING_STATE_ON,
     RUNNING_STEP_COOLDOWN,
+    RUNNING_STEP_IGNITION,
     RUNNING_STEP_RUNNING,
-    RUNNING_STEP_VENTILATION,
+    RUNNING_STEP_SELF_TEST,
     SENSOR_TEMP_MAX,
     SENSOR_TEMP_MIN,
     SERVICE_UUID,
@@ -246,6 +247,10 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._burnoff_saved_level: int | None = None
         self._burnoff_saved_temp: float | None = None
         self._burnoff_applying = False
+        # Cycle ended; still need to write saved mode/level/temp when the ECU will accept it.
+        self._burnoff_awaiting_snapshot_write = False
+        # Cycle still running, but wait for live ECU status (HA reload or failed max-power write).
+        self._burnoff_awaiting_first_status_after_reload = False
         self.data["burnoff_active"] = False
         self.data["burnoff_remaining"] = None
 
@@ -1985,6 +1990,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             "saved_mode": self._burnoff_saved_mode,
             "saved_level": self._burnoff_saved_level,
             "saved_temp": self._burnoff_saved_temp,
+            "awaiting_snapshot_write": self._burnoff_awaiting_snapshot_write,
         }
 
     async def _load_burnoff_state(self, burnoff: dict[str, Any] | None) -> None:
@@ -1997,6 +2003,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._burnoff_saved_mode = burnoff.get("saved_mode")
         self._burnoff_saved_level = burnoff.get("saved_level")
         self._burnoff_saved_temp = burnoff.get("saved_temp")
+        self._burnoff_awaiting_snapshot_write = bool(
+            burnoff.get("awaiting_snapshot_write", burnoff.get("restore_pending", False))
+        )
 
         ends_at = burnoff.get("ends_at")
         parsed: datetime | None = None
@@ -2013,12 +2022,19 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
         remaining = self.burnoff_remaining_seconds
         self._logger.info(
-            "Resuming in-progress burn-off (remaining=%ss, shutdown_after=%s)",
+            "Resuming in-progress burn-off (remaining=%ss, shutdown_after=%s, "
+            "awaiting_snapshot_write=%s)",
             remaining,
             self._burnoff_shutdown_after,
+            self._burnoff_awaiting_snapshot_write,
         )
         self._notify_burnoff_state()
-        self._schedule_burnoff_wait()
+        if self._burnoff_awaiting_snapshot_write:
+            self._burnoff_awaiting_first_status_after_reload = False
+            return
+        self._burnoff_awaiting_first_status_after_reload = True
+        if remaining is not None and remaining > 0:
+            self._schedule_burnoff_wait()
 
     def _notify_burnoff_state(self) -> None:
         """Push burn-off status into coordinator data for entities."""
@@ -2030,6 +2046,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """Enable or disable max-power burn-off before shutdown."""
         new_data = {**self.config_entry.data, CONF_BURNOFF_ENABLED: bool(enabled)}
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        if not enabled and self._burnoff_active:
+            await self._cancel_burnoff(restore=True)
         self.async_set_updated_data(self.data)
 
     async def async_set_burnoff_duration(self, minutes: int) -> None:
@@ -2054,12 +2072,15 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             return False
         if self.data.get("running_state") != RUNNING_STATE_ON:
             return False
-        step = self.data.get("running_step")
-        if step in (RUNNING_STEP_COOLDOWN, RUNNING_STEP_VENTILATION):
-            return False
         if self.data.get("running_mode") == RUNNING_MODE_VENTILATION:
             return False
-        return True
+        # Only start while actually heating. ON+STANDBY is Auto Start/Stop idle
+        # and must not re-ignite at Level 10.
+        return self.data.get("running_step") in (
+            RUNNING_STEP_SELF_TEST,
+            RUNNING_STEP_IGNITION,
+            RUNNING_STEP_RUNNING,
+        )
 
     def _ecu_shutdown_observed(self) -> bool:
         """Return True if status shows the ECU has begun shutdown."""
@@ -2067,21 +2088,42 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             return True
         return self.data.get("running_step") == RUNNING_STEP_COOLDOWN
 
+    def _ecu_can_restore(self) -> bool:
+        """Return True if mode/setpoint writes are likely to stick."""
+        return self.data.get("running_step") != RUNNING_STEP_COOLDOWN
+
     def _schedule_burnoff_abort_if_ecu_stopped(self) -> None:
-        """Abort burn-off if a successful status parse shows ECU shutdown.
+        """Sync in-progress burn-off with a successful ECU status parse.
 
         Only call after a successful parse. The parse-error path forces
         running_state=0 and must not be treated as a real off.
+
+        awaiting_snapshot_write: cycle ended; write the saved setpoint when safe.
+        awaiting_first_status_after_reload: cycle still running; re-apply max power
+        or complete the expired timer once live status is known.
         """
-        if not self._burnoff_active:
+        if not self._burnoff_active and not self._burnoff_awaiting_snapshot_write:
             return
-        if self._burnoff_cancel_event.is_set():
+
+        if self._burnoff_awaiting_snapshot_write:
+            if self._ecu_can_restore():
+                self.hass.async_create_task(self._try_snapshot_write())
             return
-        if not self._ecu_shutdown_observed():
+
+        if self._ecu_shutdown_observed():
+            if self._burnoff_cancel_event.is_set():
+                return
+            self._burnoff_cancel_event.set()
+            self.hass.async_create_task(self._abort_burnoff_on_external_shutdown())
             return
-        # Stop the wait loop immediately and prevent duplicate abort tasks.
-        self._burnoff_cancel_event.set()
-        self.hass.async_create_task(self._abort_burnoff_on_external_shutdown())
+
+        if self._burnoff_awaiting_first_status_after_reload:
+            self._burnoff_awaiting_first_status_after_reload = False
+            remaining = self.burnoff_remaining_seconds
+            if remaining is None or remaining <= 0:
+                self.hass.async_create_task(self._complete_burnoff())
+            else:
+                self.hass.async_create_task(self._apply_max_power())
 
     async def _abort_burnoff_on_external_shutdown(self) -> None:
         """Cancel burn-off when the ECU stopped outside Home Assistant."""
@@ -2095,11 +2137,14 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         await self._cancel_burnoff(restore=True)
 
     def _schedule_burnoff_wait(self) -> None:
-        """Schedule the burn-off wait task on the running event loop."""
+        """Schedule the burn-off wait as a Home Assistant background task."""
         if self._burnoff_task is not None and not self._burnoff_task.done():
             return
         self._burnoff_cancel_event.clear()
-        self._burnoff_task = asyncio.create_task(self._burnoff_wait())
+        self._burnoff_task = self.hass.async_create_background_task(
+            self._burnoff_wait(),
+            name="diesel_heater_burnoff_wait",
+        )
 
     async def _burnoff_wait(self) -> None:
         """Wait until burn-off ends, then restore mode and optionally power off."""
@@ -2126,30 +2171,35 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         except Exception:
             self._logger.exception("Burn-off wait failed")
 
-    async def _apply_max_power(self) -> None:
+    async def _apply_max_power(self) -> bool:
         """Switch to Level mode and set maximum heater level."""
         self._burnoff_applying = True
         try:
+            ok = True
             if self.data.get("running_mode") != RUNNING_MODE_LEVEL:
-                await self.async_set_mode(RUNNING_MODE_LEVEL)
-            await self.async_set_level(MAX_LEVEL)
+                ok = bool(await self.async_set_mode(RUNNING_MODE_LEVEL))
+            ok = bool(await self.async_set_level(MAX_LEVEL)) and ok
+            return ok
         finally:
             self._burnoff_applying = False
 
-    async def _restore_saved_mode(self) -> None:
+    async def _restore_saved_mode(self) -> bool:
         """Restore the heating mode and setpoint captured before burn-off."""
         mode = self._burnoff_saved_mode
         level = self._burnoff_saved_level
         temp = self._burnoff_saved_temp
         if mode is None:
-            return
+            return True
+        if not self._ecu_can_restore():
+            return False
         self._burnoff_applying = True
         try:
-            await self.async_set_mode(int(mode))
+            ok = bool(await self.async_set_mode(int(mode)))
             if mode == RUNNING_MODE_LEVEL and level is not None:
-                await self.async_set_level(int(level))
+                ok = bool(await self.async_set_level(int(level))) and ok
             elif mode == RUNNING_MODE_TEMPERATURE and temp is not None:
-                await self.async_set_temperature(float(temp))
+                ok = bool(await self.async_set_temperature(float(temp))) and ok
+            return ok
         finally:
             self._burnoff_applying = False
 
@@ -2161,13 +2211,36 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._burnoff_saved_mode = None
         self._burnoff_saved_level = None
         self._burnoff_saved_temp = None
+        self._burnoff_awaiting_snapshot_write = False
+        self._burnoff_awaiting_first_status_after_reload = False
         self._burnoff_task = None
         await self.async_save_data()
         self._notify_burnoff_state()
 
+    async def _mark_awaiting_snapshot_write(self) -> None:
+        """Remember that the snapshot still needs to be written to the ECU."""
+        self._burnoff_awaiting_snapshot_write = True
+        self._burnoff_shutdown_after = False
+        await self.async_save_data()
+        self._notify_burnoff_state()
+
+    async def _try_snapshot_write(self) -> None:
+        """Write the saved mode/setpoint now that the ECU can accept settings."""
+        async with self._burnoff_lock:
+            if not self._burnoff_awaiting_snapshot_write:
+                return
+            if not self._ecu_can_restore():
+                return
+            if await self._restore_saved_mode():
+                await self._clear_burnoff_state()
+
     async def _cancel_burnoff(self, *, restore: bool) -> None:
         """Cancel an in-progress burn-off, optionally restoring the previous mode."""
-        if not self._burnoff_active and self._burnoff_task is None:
+        if (
+            not self._burnoff_active
+            and self._burnoff_task is None
+            and not self._burnoff_awaiting_snapshot_write
+        ):
             return
 
         self._burnoff_cancel_event.set()
@@ -2179,10 +2252,14 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 await task
 
         async with self._burnoff_lock:
-            if not self._burnoff_active:
+            if not self._burnoff_active and not self._burnoff_awaiting_snapshot_write:
                 return
             if restore:
-                await self._restore_saved_mode()
+                if self._ecu_can_restore() and await self._restore_saved_mode():
+                    await self._clear_burnoff_state()
+                    return
+                await self._mark_awaiting_snapshot_write()
+                return
             await self._clear_burnoff_state()
 
     async def _complete_burnoff(self) -> None:
@@ -2190,11 +2267,17 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         async with self._burnoff_lock:
             if not self._burnoff_active:
                 return
-            shutdown_after = self._burnoff_shutdown_after
-            self._logger.info(
-                "Burn-off complete (shutdown_after=%s)", shutdown_after
+            shutdown_after = (
+                self._burnoff_shutdown_after and not self._ecu_shutdown_observed()
             )
-            await self._restore_saved_mode()
+            self._logger.info(
+                "Burn-off complete (shutdown_after=%s, can_restore=%s)",
+                shutdown_after,
+                self._ecu_can_restore(),
+            )
+            if not self._ecu_can_restore() or not await self._restore_saved_mode():
+                await self._mark_awaiting_snapshot_write()
+                return
             await self._clear_burnoff_state()
         if shutdown_after:
             await self._power_off()
@@ -2202,9 +2285,14 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
     async def _power_off(self) -> None:
         """Send the real power-off command."""
         # ABBA uses a toggle command (0xA1) for both ON and OFF.
-        # Guard against accidental toggle: skip if already off.
-        if self._protocol_mode == 5 and self.data.get("running_state", 0) == 0:
-            self._logger.info("ABBA: Heater already off, skipping toggle command")
+        # Skip if already off, and never toggle during cooldown (would restart).
+        if self._protocol_mode == 5 and (
+            self.data.get("running_state", 0) == 0
+            or self.data.get("running_step") == RUNNING_STEP_COOLDOWN
+        ):
+            self._logger.info(
+                "ABBA: Heater already off or in cooldown, skipping toggle"
+            )
             return
         success = await self._send_command(3, 0)
         if success:
@@ -2234,6 +2322,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             self._burnoff_saved_level = self.data.get("set_level")
             self._burnoff_saved_temp = self.data.get("set_temp")
             self._burnoff_shutdown_after = shutdown_after
+            self._burnoff_awaiting_snapshot_write = False
+            self._burnoff_awaiting_first_status_after_reload = False
             self._burnoff_active = True
             duration = self.burnoff_duration_minutes
             self._burnoff_ends_at = datetime.now(timezone.utc) + timedelta(minutes=duration)
@@ -2248,7 +2338,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 self._burnoff_saved_temp,
             )
 
-            await self._apply_max_power()
+            if not await self._apply_max_power():
+                # Same wait-for-status path as HA reload: next parse re-sends Level 10.
+                self._burnoff_awaiting_first_status_after_reload = True
             await self.async_save_data()
             self._notify_burnoff_state()
             self._schedule_burnoff_wait()
@@ -2280,19 +2372,23 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         configured duration, restores the previous heating mode, then sends the
         real power-off command. Pass immediate=True to skip burn-off.
         """
+        if immediate:
+            await self._cancel_burnoff(restore=True)
+            if not self._ecu_shutdown_observed():
+                await self._power_off()
+            return
+
+        if self._burnoff_active:
+            if self._burnoff_awaiting_snapshot_write or self._ecu_shutdown_observed():
+                await self._cancel_burnoff(restore=True)
+                return
+            await self.async_turn_off(immediate=True)
+            return
+
         # ABBA uses a toggle command (0xA1) for both ON and OFF.
         # Guard against accidental toggle: skip if already off.
         if self._protocol_mode == 5 and self.data.get("running_state", 0) == 0:
             self._logger.info("ABBA: Heater already off, skipping toggle command")
-            return
-
-        if immediate:
-            await self._cancel_burnoff(restore=True)
-            await self._power_off()
-            return
-
-        if self._burnoff_active:
-            self._logger.debug("Burn-off already in progress, ignoring duplicate off")
             return
 
         if self._should_burnoff_before_shutdown():
@@ -2310,7 +2406,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """
         if self._burnoff_active and not self._burnoff_applying:
             self._logger.info("Ignoring level change during burn-off")
-            return
+            return False
 
         level = max(1, min(10, level))
 
@@ -2335,6 +2431,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             self._logger.info("✅ SET LEVEL SUCCESS: level=%d", level)
         else:
             self._logger.warning("❌ SET LEVEL FAILED: level=%d", level)
+        return success
 
     async def async_set_temperature(self, temperature: float) -> None:
         """Set target temperature in heater's native unit (no conversions).
@@ -2346,7 +2443,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """
         if self._burnoff_active and not self._burnoff_applying:
             self._logger.info("Ignoring temperature change during burn-off")
-            return
+            return False
 
         current_temp = self.data.get("set_temp", "unknown")
         current_mode = self.data.get("running_mode", "unknown")
@@ -2385,6 +2482,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             )
         else:
             self._logger.warning("🌡️ SET TEMPERATURE FAILED: command not sent successfully")
+        return success
 
     async def async_set_mode(self, mode: int) -> None:
         """Set running mode (0=Manual, 1=Level, 2=Temperature, 3=Ventilation).
@@ -2394,13 +2492,13 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """
         if self._burnoff_active and not self._burnoff_applying:
             self._logger.info("Ignoring mode change during burn-off")
-            return
+            return False
 
         # Ventilation mode (ABBA only)
         if mode == 3:
             if self._protocol_mode != 5:
                 self._logger.warning("Ventilation mode is only available for ABBA devices")
-                return
+                return False
 
             running_step = self.data.get("running_step", 0)
             if running_step not in (0, 6):  # STANDBY or VENTILATION
@@ -2408,13 +2506,13 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                     "Ventilation mode only available when heater is off (current step: %d)",
                     running_step
                 )
-                return
+                return False
 
             self._logger.info("Activating ventilation mode (ABBA 0xA4)")
             success = await self._send_command(101, 0)  # Command 101 = ventilation
             if success:
                 await self.async_request_refresh()
-            return
+            return success
 
         # Standard modes (0-2)
         mode = max(0, min(2, mode))
@@ -2422,6 +2520,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         success = await self._send_command(2, mode)
         if success:
             await self.async_request_refresh()
+        return success
 
     async def async_set_auto_start_stop(self, enabled: bool) -> None:
         """Set Automatic Start/Stop mode (cmd 18).
