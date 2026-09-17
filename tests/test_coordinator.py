@@ -5238,10 +5238,11 @@ class TestUnifiedBurnoff:
 
         coordinator._update_runtime_tracking(3600)
 
+        # Same two-interval cap as _burnoff_hour_tick_cap (one missed poll).
         assert coordinator._burnoff_heating_seconds == UPDATE_INTERVAL * 2
         assert coordinator._daily_runtime_seconds == 3600
 
-        coordinator._protocol_mode = 7
+        coordinator._protocol_mode = 7  # Hcalory (5s poll -> 10s cap)
         coordinator._burnoff_heating_seconds = 0.0
         coordinator._update_runtime_tracking(3600)
         assert coordinator._burnoff_heating_seconds == UPDATE_INTERVAL_HCALORY * 2
@@ -5269,6 +5270,7 @@ class TestUnifiedBurnoff:
         _enable_in_run(coordinator, hours=1, duration=10)
         coordinator._burnoff_heating_seconds = 3600.0
         coordinator._burnoff_cycles = 2
+        # 60s left of 10 min (600s) is 10%, under the 20% near-complete ratio.
         self._active_in_run(coordinator, remaining_seconds=60)
         coordinator.data["running_state"] = RUNNING_STATE_OFF
 
@@ -5286,6 +5288,7 @@ class TestUnifiedBurnoff:
         coordinator = create_mock_coordinator()
         _enable_in_run(coordinator, hours=1, duration=10)
         coordinator._burnoff_heating_seconds = 3600.0
+        # 500s left of 10 min is ~83%, so this is an early abort, not success.
         self._active_in_run(coordinator, remaining_seconds=500)
         coordinator.data["running_state"] = RUNNING_STATE_OFF
 
@@ -5296,6 +5299,7 @@ class TestUnifiedBurnoff:
         assert coordinator._burnoff_skip_in_run is False
         assert coordinator._burnoff_in_run_aborts == 1
 
+        # Same early-abort remaining time as the first attempt above.
         self._active_in_run(coordinator, remaining_seconds=500)
         coordinator._burnoff_pending = False
         coordinator.data["running_state"] = RUNNING_STATE_OFF

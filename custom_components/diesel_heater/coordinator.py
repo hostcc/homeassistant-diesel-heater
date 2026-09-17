@@ -2156,6 +2156,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         duration_seconds = self.burnoff_duration_minutes * 60
         if remaining is None or duration_seconds <= 0:
             return False
+        # Last BURNOFF_NEAR_COMPLETE_REMAINING_RATIO of the timer (20%): soot
+        # is effectively burned; ECU cooldown from Level 10 is common here.
         return remaining <= duration_seconds * BURNOFF_NEAR_COMPLETE_REMAINING_RATIO
 
     def _burnoff_should_run_in_cycle(self) -> bool:
@@ -2175,8 +2177,12 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
     def _burnoff_hour_tick_cap(self) -> float:
         """Return max RUNNING seconds to credit per status update."""
         interval = (
-            UPDATE_INTERVAL_HCALORY if self._protocol_mode == 7 else UPDATE_INTERVAL
+            UPDATE_INTERVAL_HCALORY
+            if self._protocol_mode == 7  # Hcalory
+            else UPDATE_INTERVAL
         )
+        # Elapsed is now minus last successful poll. Two intervals covers one
+        # missed (or late) update; a long BLE disconnect must not dump hours.
         return float(interval * 2)
 
     def _accumulate_burnoff_hours(self, elapsed_seconds: float) -> None:
@@ -2486,6 +2492,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             return
         if was_in_run:
             self._burnoff_in_run_aborts += 1
+            # > not >=: abort #1 (count == MAX) still retries; abort #2+ skips.
             if self._burnoff_in_run_aborts > MAX_BURNOFF_IN_RUN_ABORTS:
                 self._logger.info(
                     "In-run burn-off aborted %d time(s); skipping further "

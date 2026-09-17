@@ -270,9 +270,11 @@ MIN_BURNOFF_AFTER_CYCLES: Final = 0
 MAX_BURNOFF_AFTER_CYCLES: Final = 20
 MIN_BURNOFF_AFTER_HOURS: Final = 0
 MAX_BURNOFF_AFTER_HOURS: Final = 24
-# Retry in-run once after an early ECU abort; further aborts block threshold in-run.
+# Abort count after which threshold in-run is skipped. 1 means the first early
+# ECU abort still retries (pending); a second abort cannot loop Level 10 forever.
 MAX_BURNOFF_IN_RUN_ABORTS: Final = 1
-# Treat an ECU abort as success when this much of the timer remains or less.
+# Fraction of duration still remaining at which an ECU abort counts as a clean.
+# 0.2 = last 20%: Level 10 often trips Auto Start/Stop cooldown near the end.
 BURNOFF_NEAR_COMPLETE_REMAINING_RATIO: Final = 0.2
 STORAGE_KEY_BURNOFF: Final = "burnoff"
 STORAGE_KEY_BURNOFF_ACCUMULATOR: Final = "burnoff_accumulator"
