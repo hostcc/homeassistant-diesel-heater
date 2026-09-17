@@ -13,6 +13,8 @@ from custom_components.diesel_heater.number import (
     VevorHeaterOffsetNumber,
     VevorTankCapacityNumber,
     VevorBurnoffDurationNumber,
+    VevorBurnoffAfterCyclesNumber,
+    VevorBurnoffAfterHoursNumber,
     async_setup_entry,
 )
 from custom_components.diesel_heater.const import (
@@ -34,7 +36,11 @@ def create_mock_coordinator(protocol_mode: int = 0) -> MagicMock:
     coordinator.async_set_heater_offset = AsyncMock()
     coordinator.async_set_tank_capacity = AsyncMock()
     coordinator.async_set_burnoff_duration = AsyncMock()
+    coordinator.async_set_burnoff_after_cycles = AsyncMock()
+    coordinator.async_set_burnoff_after_hours = AsyncMock()
     coordinator.burnoff_duration_minutes = 10
+    coordinator.burnoff_after_cycles = 0
+    coordinator.burnoff_after_hours = 0
     coordinator.burnoff_active = False
     coordinator.protocol_mode = protocol_mode
     coordinator._heater_uses_fahrenheit = False
@@ -237,8 +243,8 @@ class TestAsyncSetupEntry:
         # Verify async_add_entities was called
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 0 creates all entities (5 core + offset = 6)
-        assert len(call_args) == 6
+        # Mode 0 creates all entities (7 core + offset = 8)
+        assert len(call_args) == 8
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_2(self):
@@ -254,8 +260,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 2 includes offset (5 core + offset = 6)
-        assert len(call_args) == 6
+        # Mode 2 includes offset (7 core + offset = 8)
+        assert len(call_args) == 8
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_1(self):
@@ -271,8 +277,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 1 excludes offset (5 core entities)
-        assert len(call_args) == 5
+        # Mode 1 excludes offset (7 core entities)
+        assert len(call_args) == 7
 
 
 # ---------------------------------------------------------------------------
@@ -540,3 +546,47 @@ class TestVevorBurnoffDurationNumber:
         await number.async_set_native_value(8)
 
         coordinator.async_set_burnoff_duration.assert_called_once_with(8)
+
+
+class TestVevorBurnoffAfterCyclesNumber:
+    """Tests for burn-off after cycles number entity."""
+
+    def test_native_value(self):
+        """Test native_value returns coordinator cycle threshold."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_after_cycles = 5
+        number = VevorBurnoffAfterCyclesNumber(coordinator)
+
+        assert number.native_value == 5
+
+    @pytest.mark.asyncio
+    async def test_async_set_native_value(self):
+        """Test setting cycles calls coordinator."""
+        coordinator = create_mock_coordinator()
+        number = VevorBurnoffAfterCyclesNumber(coordinator)
+
+        await number.async_set_native_value(3)
+
+        coordinator.async_set_burnoff_after_cycles.assert_called_once_with(3)
+
+
+class TestVevorBurnoffAfterHoursNumber:
+    """Tests for burn-off after hours number entity."""
+
+    def test_native_value(self):
+        """Test native_value returns coordinator hours threshold."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_after_hours = 4
+        number = VevorBurnoffAfterHoursNumber(coordinator)
+
+        assert number.native_value == 4
+
+    @pytest.mark.asyncio
+    async def test_async_set_native_value(self):
+        """Test setting hours calls coordinator."""
+        coordinator = create_mock_coordinator()
+        number = VevorBurnoffAfterHoursNumber(coordinator)
+
+        await number.async_set_native_value(2)
+
+        coordinator.async_set_burnoff_after_hours.assert_called_once_with(2)

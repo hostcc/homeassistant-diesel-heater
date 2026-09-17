@@ -35,6 +35,8 @@ from custom_components.diesel_heater.sensor import (
     VevorStartupTempDiffSensor,
     VevorShutdownTempDiffSensor,
     VevorBurnoffRemainingSensor,
+    VevorBurnoffCyclesSensor,
+    VevorBurnoffHoursSensor,
     async_setup_entry,
 )
 from custom_components.diesel_heater.const import (
@@ -406,8 +408,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 1 creates only core sensors (19 core + altitude = 20)
-        assert len(call_args) == 20
+        # Mode 1 creates only core sensors (21 core + altitude = 22)
+        assert len(call_args) == 22
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_0(self):
@@ -423,8 +425,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 0 creates all sensors (19 core + altitude + 3 extended + 5 CBFF = 28)
-        assert len(call_args) == 28
+        # Mode 0 creates all sensors (21 core + altitude + 3 extended + 5 CBFF = 30)
+        assert len(call_args) == 30
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_2(self):
@@ -440,8 +442,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 2 creates core + extended (19 + altitude + 3 = 23)
-        assert len(call_args) == 23
+        # Mode 2 creates core + extended (21 + altitude + 3 = 25)
+        assert len(call_args) == 25
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_6(self):
@@ -457,8 +459,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 6 creates all sensors (19 core + altitude + 3 extended + 5 CBFF = 28)
-        assert len(call_args) == 28
+        # Mode 6 creates all sensors (21 core + altitude + 3 extended + 5 CBFF = 30)
+        assert len(call_args) == 30
 
 
 # ---------------------------------------------------------------------------
@@ -1291,3 +1293,27 @@ class TestVevorBurnoffRemainingSensor:
         sensor = VevorBurnoffRemainingSensor(coordinator)
 
         assert sensor.available is False
+
+
+class TestVevorBurnoffCyclesSensor:
+    """Tests for heat cycles since burn-off sensor."""
+
+    def test_native_value(self):
+        """Test native_value returns coordinator cycle count."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_cycles_since = 4
+        sensor = VevorBurnoffCyclesSensor(coordinator)
+
+        assert sensor.native_value == 4
+
+
+class TestVevorBurnoffHoursSensor:
+    """Tests for heat hours since burn-off sensor."""
+
+    def test_native_value(self):
+        """Test native_value returns coordinator hours since burn-off."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_hours_since = 1.5
+        sensor = VevorBurnoffHoursSensor(coordinator)
+
+        assert sensor.native_value == 1.5

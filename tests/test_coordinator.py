@@ -43,6 +43,9 @@ from custom_components.diesel_heater.const import (
     STORAGE_KEY_LAST_REFUELED,
     STORAGE_KEY_AUTO_OFFSET_ENABLED,
     STORAGE_KEY_BURNOFF,
+    STORAGE_KEY_BURNOFF_ACCUMULATOR,
+    CONF_BURNOFF_AFTER_CYCLES,
+    CONF_BURNOFF_AFTER_HOURS,
     CONF_BURNOFF_DURATION,
     CONF_BURNOFF_ENABLED,
 )
@@ -189,8 +192,21 @@ def create_mock_coordinator() -> VevorHeaterCoordinator:
     coordinator._burnoff_applying = False
     coordinator._burnoff_awaiting_snapshot_write = False
     coordinator._burnoff_awaiting_first_status_after_reload = False
+    coordinator._burnoff_heating_seconds = 0.0
+    coordinator._burnoff_cycles = 0
+    coordinator._burnoff_pending = False
+    coordinator._burnoff_just_completed = False
+    coordinator._burnoff_prev_step = None
+    coordinator._burnoff_prev_state = None
+    coordinator._burnoff_prev_mode = None
+    coordinator._burnoff_skip_pending_on_off = False
+    coordinator._burnoff_ha_power_off = False
+    coordinator._burnoff_start_scheduled = False
     coordinator.data["burnoff_active"] = False
     coordinator.data["burnoff_remaining"] = None
+    coordinator.data["burnoff_cycles"] = 0
+    coordinator.data["burnoff_hours"] = 0.0
+    coordinator.data["burnoff_pending"] = False
 
     return coordinator
 
@@ -4075,10 +4091,34 @@ def _enable_burnoff(coordinator, duration: int = 10) -> None:
     }
 
 
+def _enable_in_run(coordinator, *, cycles: int = 0, hours: int = 0, duration: int = 10) -> None:
+    """Enable automatic burn-off with in-run thresholds."""
+    coordinator.config_entry.data = {
+        **coordinator.config_entry.data,
+        CONF_BURNOFF_ENABLED: True,
+        CONF_BURNOFF_DURATION: duration,
+        CONF_BURNOFF_AFTER_CYCLES: cycles,
+        CONF_BURNOFF_AFTER_HOURS: hours,
+    }
+
+
 def _set_heating(coordinator, step: int = RUNNING_STEP_RUNNING) -> None:
     """Mark the heater as on and actively heating."""
     coordinator.data["running_state"] = RUNNING_STATE_ON
     coordinator.data["running_step"] = step
+
+
+def _install_task_runner(coordinator) -> list:
+    """Run hass.async_create_task coroutines on the test event loop."""
+    tasks: list = []
+
+    def _create_task(coro, *args, **kwargs):
+        task = asyncio.create_task(coro)
+        tasks.append(task)
+        return task
+
+    coordinator.hass.async_create_task = _create_task
+    return tasks
 
 
 class TestBurnoffOnShutdown:
@@ -4795,3 +4835,298 @@ class TestBurnoffOnShutdown:
 
         coordinator.data["running_step"] = RUNNING_STEP_STANDBY
         assert coordinator._ecu_can_restore() is True
+
+
+class TestUnifiedBurnoff:
+    """In-run burn-off, dirty HA Off, and deferred LCD Off."""
+
+    def _seed_status(self, coordinator, *, state, step, mode=RUNNING_MODE_TEMPERATURE):
+        coordinator.data["running_state"] = state
+        coordinator.data["running_step"] = step
+        coordinator.data["running_mode"] = mode
+        coordinator._observe_burnoff_status()
+
+    @pytest.mark.asyncio
+    async def test_hours_accumulate_in_level_and_temperature(self):
+        """RUNNING time in Level and Temperature modes counts toward burn-off hours."""
+        coordinator = create_mock_coordinator()
+        coordinator.data["running_step"] = RUNNING_STEP_RUNNING
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator._update_runtime_tracking(1800)
+        assert coordinator._burnoff_heating_seconds == 1800
+
+        coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
+        coordinator._update_runtime_tracking(1800)
+        assert coordinator._burnoff_heating_seconds == 3600
+        assert coordinator.burnoff_hours_since == 1.0
+
+    @pytest.mark.asyncio
+    async def test_controller_idle_increments_cycle_once(self):
+        """Heating to standby while ON counts one cycle; cooldown then standby does not double."""
+        coordinator = create_mock_coordinator()
+        tasks = _install_task_runner(coordinator)
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_RUNNING
+        )
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_COOLDOWN
+        )
+        assert coordinator._burnoff_cycles == 1
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_STANDBY
+        )
+        assert coordinator._burnoff_cycles == 1
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_ha_off_does_not_count_as_controller_cycle(self):
+        """HA-initiated power-off must not increment the controller cycle counter."""
+        coordinator = create_mock_coordinator()
+        tasks = _install_task_runner(coordinator)
+        coordinator._burnoff_ha_power_off = True
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_RUNNING
+        )
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_COOLDOWN
+        )
+        assert coordinator._burnoff_cycles == 0
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_cycle_threshold_starts_in_run_on_next_running(self):
+        """After N controller cycles, burn-off starts on the next RUNNING step."""
+        coordinator = create_mock_coordinator()
+        _enable_in_run(coordinator, cycles=1)
+        _set_heating(coordinator)
+        coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
+        coordinator.data["set_temp"] = 21
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._schedule_burnoff_wait = MagicMock()
+        tasks = _install_task_runner(coordinator)
+
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_RUNNING
+        )
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_STANDBY
+        )
+        assert coordinator.burnoff_active is False
+        assert coordinator._burnoff_pending is True
+
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_IGNITION
+        )
+        assert coordinator.burnoff_active is False
+
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_RUNNING
+        )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert coordinator.burnoff_active is True
+        assert coordinator._burnoff_shutdown_after is False
+        commands = [call[0] for call in coordinator._send_command.call_args_list]
+        assert (2, RUNNING_MODE_LEVEL) in commands
+        assert (4, MAX_LEVEL) in commands
+        assert (3, 0) not in commands
+
+        await coordinator._complete_burnoff()
+        commands = [call[0] for call in coordinator._send_command.call_args_list]
+        assert (2, RUNNING_MODE_TEMPERATURE) in commands
+        assert (3, 0) not in commands
+        assert coordinator._burnoff_cycles == 0
+        assert coordinator._burnoff_pending is False
+
+    @pytest.mark.asyncio
+    async def test_hours_threshold_starts_in_run_mid_run(self):
+        """Hours threshold starts in-run burn-off while still RUNNING."""
+        coordinator = create_mock_coordinator()
+        _enable_in_run(coordinator, hours=1)
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_RUNNING
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator.data["set_level"] = 3
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._schedule_burnoff_wait = MagicMock()
+        tasks = _install_task_runner(coordinator)
+
+        coordinator._update_runtime_tracking(3600)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert coordinator.burnoff_active is True
+        assert coordinator._burnoff_shutdown_after is False
+
+    @pytest.mark.asyncio
+    async def test_ha_off_while_clean_powers_off_immediately(self):
+        """HA Off after a successful burn-off does not start another cycle."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator)
+        _set_heating(coordinator)
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._burnoff_active = True
+        coordinator._burnoff_shutdown_after = False
+        coordinator._burnoff_saved_mode = RUNNING_MODE_LEVEL
+        coordinator._burnoff_saved_level = 3
+
+        await coordinator._complete_burnoff()
+        coordinator._send_command.reset_mock()
+        _set_heating(coordinator)
+
+        await coordinator.async_turn_off()
+
+        assert coordinator.burnoff_active is False
+        coordinator._send_command.assert_called_once_with(3, 0)
+
+    @pytest.mark.asyncio
+    async def test_lcd_off_sets_pending_and_next_running_in_runs(self):
+        """Controller power Off while dirty defers burn-off until the next RUNNING."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator)
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._schedule_burnoff_wait = MagicMock()
+        tasks = _install_task_runner(coordinator)
+
+        self._seed_status(
+            coordinator,
+            state=RUNNING_STATE_ON,
+            step=RUNNING_STEP_RUNNING,
+            mode=RUNNING_MODE_LEVEL,
+        )
+        self._seed_status(
+            coordinator,
+            state=RUNNING_STATE_OFF,
+            step=RUNNING_STEP_STANDBY,
+            mode=RUNNING_MODE_LEVEL,
+        )
+
+        assert coordinator._burnoff_pending is True
+        assert coordinator.burnoff_active is False
+        coordinator._send_command.assert_not_called()
+
+        self._seed_status(
+            coordinator,
+            state=RUNNING_STATE_ON,
+            step=RUNNING_STEP_RUNNING,
+            mode=RUNNING_MODE_LEVEL,
+        )
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert coordinator.burnoff_active is True
+        assert coordinator._burnoff_shutdown_after is False
+
+    @pytest.mark.asyncio
+    async def test_parse_error_off_does_not_set_pending(self):
+        """Forcing running_state=0 without observe (parse-error path) is not LCD Off."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator)
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_RUNNING
+        )
+        coordinator.data["running_state"] = 0
+        coordinator.data["running_step"] = 0
+
+        assert coordinator._burnoff_pending is False
+
+    @pytest.mark.asyncio
+    async def test_power_off_now_does_not_set_pending(self):
+        """Power Off Now skips burn-off and must not defer one to the next start."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator)
+        _set_heating(coordinator)
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._schedule_burnoff_wait = MagicMock()
+        tasks = _install_task_runner(coordinator)
+
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_ON, step=RUNNING_STEP_RUNNING
+        )
+        await coordinator.async_power_off_now()
+        self._seed_status(
+            coordinator, state=RUNNING_STATE_OFF, step=RUNNING_STEP_STANDBY
+        )
+
+        assert coordinator._burnoff_pending is False
+        assert coordinator.burnoff_active is False
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_abort_keeps_accumulator_complete_resets(self):
+        """External abort keeps soot load; a successful complete clears it."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator)
+        coordinator._burnoff_heating_seconds = 120.0
+        coordinator._burnoff_cycles = 2
+        coordinator.data["running_state"] = RUNNING_STATE_OFF
+        coordinator.data["running_step"] = RUNNING_STEP_STANDBY
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._burnoff_active = True
+        coordinator._burnoff_saved_mode = RUNNING_MODE_TEMPERATURE
+        coordinator._burnoff_saved_temp = 21
+
+        await coordinator._abort_burnoff_on_external_shutdown()
+
+        assert coordinator._burnoff_heating_seconds == 120.0
+        assert coordinator._burnoff_cycles == 2
+        assert coordinator._burnoff_pending is True
+
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_RUNNING
+        coordinator._burnoff_active = True
+        coordinator._burnoff_shutdown_after = False
+        coordinator._burnoff_saved_mode = RUNNING_MODE_TEMPERATURE
+        coordinator._burnoff_saved_temp = 21
+        await coordinator._complete_burnoff()
+
+        assert coordinator._burnoff_heating_seconds == 0.0
+        assert coordinator._burnoff_cycles == 0
+        assert coordinator._burnoff_pending is False
+        assert coordinator._burnoff_just_completed is True
+
+    @pytest.mark.asyncio
+    async def test_accumulator_persists_across_save_and_load(self):
+        """Soot-load counters and pending survive Home Assistant restart."""
+        coordinator = create_mock_coordinator()
+        coordinator._burnoff_heating_seconds = 7200.0
+        coordinator._burnoff_cycles = 3
+        coordinator._burnoff_pending = True
+        coordinator._burnoff_just_completed = False
+
+        await coordinator.async_save_data()
+        payload = coordinator._store.async_save.call_args[0][0][
+            STORAGE_KEY_BURNOFF_ACCUMULATOR
+        ]
+        assert payload["seconds"] == 7200.0
+        assert payload["cycles"] == 3
+        assert payload["pending"] is True
+
+        resumed = create_mock_coordinator()
+        resumed._load_burnoff_accumulator(payload)
+        assert resumed._burnoff_heating_seconds == 7200.0
+        assert resumed._burnoff_cycles == 3
+        assert resumed._burnoff_pending is True
+
+    @pytest.mark.asyncio
+    async def test_thresholds_zero_do_not_in_run_without_pending(self):
+        """Switch on and thresholds 0 must not start in-run without pending/LCD Off."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator)
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._schedule_burnoff_wait = MagicMock()
+        tasks = _install_task_runner(coordinator)
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_RUNNING
+        coordinator.data["running_mode"] = RUNNING_MODE_LEVEL
+        coordinator._update_runtime_tracking(7200)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert coordinator.burnoff_active is False

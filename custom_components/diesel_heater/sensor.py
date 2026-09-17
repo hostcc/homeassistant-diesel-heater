@@ -71,6 +71,8 @@ async def async_setup_entry(
         VevorLastRefueledSensor(coordinator),
         VevorFuelConsumedSinceResetSensor(coordinator),
         VevorBurnoffRemainingSensor(coordinator),
+        VevorBurnoffCyclesSensor(coordinator),
+        VevorBurnoffHoursSensor(coordinator),
     ]
 
     # Altitude sensor (not available for Hcalory - @Xev, issue #34)
@@ -826,3 +828,40 @@ class VevorBurnoffRemainingSensor(VevorSensorBase):
     def available(self) -> bool:
         """Return if entity is available."""
         return self.coordinator.burnoff_active
+
+
+class VevorBurnoffCyclesSensor(VevorSensorBase):
+    """Controller heat cycles since the last successful burn-off."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:counter"
+
+    def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, "burnoff_cycles", "Heat Cycles Since Burn-off")
+
+    @property
+    def native_value(self) -> int:
+        """Return cycles since last successful burn-off."""
+        return self.coordinator.burnoff_cycles_since
+
+
+class VevorBurnoffHoursSensor(VevorSensorBase):
+    """RUNNING hours since the last successful burn-off."""
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:timer-outline"
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: VevorHeaterCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, "burnoff_hours", "Heat Hours Since Burn-off")
+
+    @property
+    def native_value(self) -> float:
+        """Return hours since last successful burn-off."""
+        return self.coordinator.burnoff_hours_since
