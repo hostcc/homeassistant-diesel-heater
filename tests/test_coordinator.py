@@ -5283,6 +5283,26 @@ class TestUnifiedBurnoff:
         assert coordinator._burnoff_skip_in_run is False
 
     @pytest.mark.asyncio
+    async def test_near_complete_shutdown_abort_counts_as_success(self):
+        """ECU abort near the end of HA Off burn-off also clears the soot load."""
+        coordinator = create_mock_coordinator()
+        _enable_burnoff(coordinator, duration=10)
+        coordinator._burnoff_heating_seconds = 3600.0
+        coordinator._burnoff_cycles = 2
+        # 60s left of 10 min (600s) is 10%, under the 20% near-complete ratio.
+        self._active_in_run(coordinator, remaining_seconds=60)
+        coordinator._burnoff_shutdown_after = True
+        coordinator.data["running_state"] = RUNNING_STATE_OFF
+
+        await coordinator._abort_burnoff_on_external_shutdown()
+
+        assert coordinator._burnoff_heating_seconds == 0.0
+        assert coordinator._burnoff_cycles == 0
+        assert coordinator._burnoff_pending is False
+        assert coordinator._burnoff_just_completed is True
+        assert coordinator._burnoff_skip_in_run is False
+
+    @pytest.mark.asyncio
     async def test_in_run_abort_retries_once_then_skips_threshold(self):
         """A second early in-run abort blocks hours/cycles until LCD pending."""
         coordinator = create_mock_coordinator()

@@ -632,7 +632,7 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
   - HA Off still burns only if dirty since the last successful burn-off
   - LCD/controller power Off while heating or in cooldown sets pending; the next RUNNING start burns (does not re-ignite while off). Idle ON+standby Off does not set pending
   - Timer complete resets soot even if restore is deferred until cooldown ends
-  - Early in-run abort retries once; a near-complete abort counts as success
+  - Early in-run abort retries once; a near-complete abort (in-run or HA Off) counts as success
   - `number.*_burnoff_after_cycles` and `number.*_burnoff_after_hours` (both default 0)
   - Diagnostic sensors for cycles and hours since last burn-off, plus Burn-off Pending
   - Existing `switch.*_burnoff_on_shutdown` remains the master enable; thresholds 0 keep today’s HA Off path

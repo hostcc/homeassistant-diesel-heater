@@ -2483,9 +2483,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         await self._cancel_burnoff(restore=True)
         if not self.burnoff_enabled or self._burnoff_skip_pending_on_off:
             return
-        if was_in_run and nearly_done:
+        if nearly_done:
             self._logger.info(
-                "In-run burn-off aborted near timer end; treating as successful"
+                "Burn-off aborted near timer end; treating as successful"
             )
             self._reset_burnoff_accumulator()
             await self.async_save_data()
