@@ -190,7 +190,7 @@ Burn-off is **off by default**. Timing is unified across modes:
 
 - **HA Off while dirty and heating** (climate, power switch, or fan): max power, restore, then the real power-off. A clean Off (just finished a burn-off, or never heated) powers off immediately. Skip with **Power Off Now**, or tap Off during an in-progress cycle.
 - **In-run** (optional): after `number.*_burnoff_after_hours` of RUNNING time and/or `number.*_burnoff_after_cycles` controller heat cycles (leave-heating while still ON, e.g. Auto Start/Stop). Starts only on an established **RUNNING** step (`shutdown_after` is false). Both thresholds default to **0** (disabled).
-- **LCD/controller power Off while dirty**: Home Assistant cannot intercept that Off. It sets pending and runs in-run burn-off on the **next** RUNNING start (LCD or HA). It does not re-ignite while the heater is off.
+- **LCD/controller power Off while heating or in cooldown**: Home Assistant cannot intercept that Off. It sets pending and runs in-run burn-off on the **next** RUNNING start (LCD or HA). Off from Auto Start/Stop idle (ON + standby) does not set pending. It does not re-ignite while the heater is off.
 
 Diagnostics `Heat Cycles Since Burn-off` and `Heat Hours Since Burn-off` show load since the last successful cycle. `Burn-off Pending` is on when the next RUNNING start will burn.
 
@@ -198,7 +198,7 @@ Diagnostics `Heat Cycles Since Burn-off` and `Heat Hours Since Burn-off` show lo
 - Turning the heater back on in Home Assistant during burn-off cancels the delayed off and restores the previous mode
 - Off during burn-off skips remaining time, restores the previous mode, and powers off
 - Disabling `switch.*_burnoff_on_shutdown` during a cycle restores the previous mode and keeps heating; it also clears a deferred pending start
-- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle and does **not** send another off. Restore is deferred until cooldown ends (or the next HA turn-on). The soot load is kept so the next RUNNING can retry
+- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle and does **not** send another off. Restore is deferred until cooldown ends (or the next HA turn-on). An abort near the end of the timer still counts as a successful clean. An early in-run abort retries once; a second abort skips further hours/cycles in-run until the next successful cycle (LCD Off pending and dirty HA Off still run)
 - After a Home Assistant restart, burn-off waits for a live ECU status before completing: it re-applies max power if still heating, or defers restore if the ECU already stopped
 - **Limitation:** Home Assistant cannot intercept LCD Off or ECU Auto Start/Stop in progress. LCD Off is deferred to the next heat. The LCD is not locked during an HA burn-off; it can still change level/mode or start cooldown
 
@@ -630,7 +630,9 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
 - **Unified burn-off**: One soot accumulator (RUNNING hours + controller heat cycles)
   - In-run burn-off when After Hours or After Cycles is reached, only on an established RUNNING step
   - HA Off still burns only if dirty since the last successful burn-off
-  - LCD/controller power Off while dirty sets pending; the next RUNNING start burns (does not re-ignite while off)
+  - LCD/controller power Off while heating or in cooldown sets pending; the next RUNNING start burns (does not re-ignite while off). Idle ON+standby Off does not set pending
+  - Timer complete resets soot even if restore is deferred until cooldown ends
+  - Early in-run abort retries once; a near-complete abort counts as success
   - `number.*_burnoff_after_cycles` and `number.*_burnoff_after_hours` (both default 0)
   - Diagnostic sensors for cycles and hours since last burn-off, plus Burn-off Pending
   - Existing `switch.*_burnoff_on_shutdown` remains the master enable; thresholds 0 keep today’s HA Off path
