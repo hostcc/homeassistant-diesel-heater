@@ -33,7 +33,7 @@ Control your Vevor/BYD/HeaterCC/Sunster/Hcalory diesel heater from Home Assistan
   - Tank Volume, Pump Type, Temperature Offset
 - 🌡️ **Auto Temperature Offset** - Automatic offset adjustment using external temperature sensor
 - ⏰ **Time Sync** - Synchronize heater clock with Home Assistant
-- 🔥 **Burn-off on Shutdown** - Run at max power before power-off to burn soot, then restore the previous heating mode
+- 🔥 **Burn-off** - Run at max power to burn soot: on dirty HA Off, in-run after hours/cycles, or deferred after LCD Off
 
 ## Table of Contents
 
@@ -182,18 +182,25 @@ logger:
 - The integration auto-detects and converts temperatures
 - If issues persist, check the logs for "protocol" messages
 
-### Burn-off on Shutdown
+### Burn-off
 
-When Home Assistant turns the heater off (climate, power switch, or fan), the integration can first run at **maximum power** for a configurable duration (default 10 minutes). This helps burn off soot. The previous heating mode and setpoint are restored immediately before the real power-off command, so the next start is not stuck on Level 10. Burn-off is **off by default**.
+When enabled (`switch.*_burnoff_on_shutdown`, off by default), the integration runs the heater at **maximum power** for a configurable duration (default 10 minutes) to burn off soot, then restores the previous heating mode and setpoint.
 
-- Enable with `switch.*_burnoff_on_shutdown`; skip a cycle with **Power Off Now**, or tap Off during an in-progress cycle
-- Burn-off starts only when Home Assistant turns the heater off while it is actually heating (self-test, ignition, or running). Auto Start/Stop idle (ON + standby) goes straight to power-off
+Burn-off is **off by default**. Timing is unified across modes:
+
+- **HA Off while dirty and heating** (climate, power switch, or fan): max power, restore, then the real power-off. A clean Off (just finished a burn-off, or never heated) powers off immediately. Skip with **Power Off Now**, or tap Off during an in-progress cycle.
+- **In-run** (optional): after `number.*_burnoff_after_hours` of RUNNING time and/or `number.*_burnoff_after_cycles` controller heat cycles (leave-heating while still ON, e.g. Auto Start/Stop). Starts only on an established **RUNNING** step (`shutdown_after` is false). Both thresholds default to **0** (disabled).
+- **LCD/controller power Off while heating or in cooldown**: Home Assistant cannot intercept that Off. It sets pending and runs in-run burn-off on the **next** RUNNING start (LCD or HA). Off from Auto Start/Stop idle (ON + standby) does not set pending. It does not re-ignite while the heater is off.
+
+Diagnostics `Heat Cycles Since Burn-off` and `Heat Hours Since Burn-off` show load since the last successful cycle. `Burn-off Pending` is on when the next RUNNING start will burn.
+
+- Auto Start/Stop idle (ON + standby) still goes straight to power-off and must not re-ignite at Level 10
 - Turning the heater back on in Home Assistant during burn-off cancels the delayed off and restores the previous mode
 - Off during burn-off skips remaining time, restores the previous mode, and powers off
-- Disabling `switch.*_burnoff_on_shutdown` during a cycle restores the previous mode and keeps heating
-- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle and does **not** send another off. Restore is deferred until cooldown ends (or the next HA turn-on), because many ECUs ignore mode/setpoint writes during cooldown
+- Disabling `switch.*_burnoff_on_shutdown` during a cycle restores the previous mode and keeps heating; it also clears a deferred pending start
+- If the physical controller or ECU Auto Start/Stop shuts the heater down **while burn-off is already running**, Home Assistant cancels the cycle and does **not** send another off. Restore is deferred until cooldown ends (or the next HA turn-on). An abort near the end of the timer still counts as a successful clean. An early in-run abort retries once; a second abort skips further hours/cycles in-run until the next successful cycle (LCD Off pending and dirty HA Off still run)
 - After a Home Assistant restart, burn-off waits for a live ECU status before completing: it re-applies max power if still heating, or defers restore if the ECU already stopped
-- **Limitation:** the physical LCD/controller and ECU Auto Start/Stop (±2°C full stop) talk to the ECU directly. Home Assistant cannot intercept those shutdowns, so they **do not start** burn-off. The LCD is also not locked during an HA burn-off; it can still change level/mode or start cooldown
+- **Limitation:** Home Assistant cannot intercept LCD Off or ECU Auto Start/Stop in progress. LCD Off is deferred to the next heat. The LCD is not locked during an HA burn-off; it can still change level/mode or start cooldown
 
 ## Finding Your Heater's MAC Address
 
@@ -252,13 +259,15 @@ Entities are created **conditionally based on the detected BLE protocol**. Only 
 | Climate | `climate.diesel_heater` | Thermostat control (8-36°C), presets (Away, Comfort) |
 | Fan | `fan.diesel_heater_heater_level` | Level control as fan entity (1-10) |
 | Switch | `switch.diesel_heater_power` | Simple ON/OFF control |
-| Switch | `switch.diesel_heater_burnoff_on_shutdown` | Max-power soot burn-off before shutdown (off by default) *(Config)* |
+| Switch | `switch.diesel_heater_burnoff_on_shutdown` | Enable automatic soot burn-off (in-run, dirty HA Off, deferred LCD Off; off by default) *(Config)* |
 | Switch | `switch.diesel_heater_auto_offset` | Auto Temperature Offset toggle *(Config)* |
 | Select | `select.diesel_heater_running_mode` | Mode selector (Off, Level, Temperature) |
 | Number | `number.diesel_heater_level` | Set heater power level (1-10) |
 | Number | `number.diesel_heater_target_temperature` | Set target temperature (8-36°C) |
 | Number | `number.diesel_heater_tank_capacity` | Set tank capacity for fuel estimation *(Config)* |
 | Number | `number.diesel_heater_burnoff_duration` | Burn-off duration in minutes (1-30, default 10) *(Config)* |
+| Number | `number.diesel_heater_burnoff_after_cycles` | In-run burn-off after N controller heat cycles (0 = off) *(Config)* |
+| Number | `number.diesel_heater_burnoff_after_hours` | In-run burn-off after N RUNNING hours (0 = off) *(Config)* |
 | Button | `button.diesel_heater_sync_time` | Sync heater clock with HA time *(Config)* |
 | Button | `button.diesel_heater_reset_est_fuel_remaining` | Reset estimated fuel after refuel *(Config)* |
 | Button | `button.diesel_heater_power_off_now` | Skip burn-off and power off immediately |
@@ -268,7 +277,10 @@ Entities are created **conditionally based on the detected BLE protocol**. Only 
 | Sensor | Daily/Total Runtime, History sensors | Runtime tracking (computed locally) |
 | Binary Sensor | Active, Problem, Connected | Heater status sensors *(Diagnostic)* |
 | Binary Sensor | Burn-off Active | Whether a max-power burn-off cycle is running *(Diagnostic)* |
+| Binary Sensor | Burn-off Pending | Next RUNNING start will run in-run burn-off *(Diagnostic)* |
 | Sensor | Burn-off Remaining | Seconds remaining in the current burn-off cycle *(Diagnostic)* |
+| Sensor | Heat Cycles Since Burn-off | Controller heat cycles since the last successful burn-off *(Diagnostic)* |
+| Sensor | Heat Hours Since Burn-off | RUNNING hours since the last successful burn-off *(Diagnostic)* |
 
 #### Extended Entities (AA55 Encrypted, AA66 Encrypted, CBFF)
 
@@ -613,6 +625,17 @@ This integration communicates via Bluetooth LE and supports 6 protocol variants 
 | 44-45 | Remaining Run Time | uint16 LE, 65535=N/A |
 
 ## Changelog
+
+### Version 2.1.5-beta.4
+- **Unified burn-off**: One soot accumulator (RUNNING hours + controller heat cycles)
+  - In-run burn-off when After Hours or After Cycles is reached, only on an established RUNNING step
+  - HA Off still burns only if dirty since the last successful burn-off
+  - LCD/controller power Off while heating or in cooldown sets pending; the next RUNNING start burns (does not re-ignite while off). Idle ON+standby Off does not set pending
+  - Timer complete resets soot even if restore is deferred until cooldown ends
+  - Early in-run abort retries once; a near-complete abort (in-run or HA Off) counts as success
+  - `number.*_burnoff_after_cycles` and `number.*_burnoff_after_hours` (both default 0)
+  - Diagnostic sensors for cycles and hours since last burn-off, plus Burn-off Pending
+  - Existing `switch.*_burnoff_on_shutdown` remains the master enable; thresholds 0 keep today’s HA Off path
 
 ### Version 2.1.5-beta.3
 - **Burn-off lifecycle**: Start only while actually heating; do not re-ignite from Auto Start/Stop idle

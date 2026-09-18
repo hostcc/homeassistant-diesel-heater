@@ -101,7 +101,7 @@ class VevorHeaterPowerSwitch(CoordinatorEntity[VevorHeaterCoordinator], SwitchEn
 
 
 class VevorBurnoffSwitch(CoordinatorEntity[VevorHeaterCoordinator], SwitchEntity):
-    """Enable max-power burn-off before shutdown."""
+    """Enable automatic soot burn-off (in-run thresholds and dirty HA Off)."""
 
     _attr_has_entity_name = True
     _attr_name = "Burn-off on Shutdown"

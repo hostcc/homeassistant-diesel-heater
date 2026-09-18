@@ -37,14 +37,19 @@ from .const import (
     AUTO_OFFSET_THROTTLE_SECONDS,
     CHARACTERISTIC_UUID,
     CHARACTERISTIC_UUID_ALT,
+    BURNOFF_NEAR_COMPLETE_REMAINING_RATIO,
     CONF_AUTO_OFFSET_ENABLED,
     CONF_AUTO_OFFSET_MAX,
+    CONF_BURNOFF_AFTER_CYCLES,
+    CONF_BURNOFF_AFTER_HOURS,
     CONF_BURNOFF_DURATION,
     CONF_BURNOFF_ENABLED,
     CONF_EXTERNAL_TEMP_SENSOR,
     CONF_PIN,
     CONF_TEMPERATURE_OFFSET,
     DEFAULT_AUTO_OFFSET_MAX,
+    DEFAULT_BURNOFF_AFTER_CYCLES,
+    DEFAULT_BURNOFF_AFTER_HOURS,
     DEFAULT_BURNOFF_DURATION,
     DEFAULT_BURNOFF_ENABLED,
     DEFAULT_PIN,
@@ -54,10 +59,15 @@ from .const import (
     HCALORY_MVP2_NOTIFY_UUID,
     HCALORY_MVP2_SERVICE_UUID,
     HCALORY_MVP2_WRITE_UUID,
+    MAX_BURNOFF_AFTER_CYCLES,
+    MAX_BURNOFF_AFTER_HOURS,
     MAX_BURNOFF_DURATION,
+    MAX_BURNOFF_IN_RUN_ABORTS,
     MAX_HEATER_OFFSET,
     MAX_HISTORY_DAYS,
     MAX_LEVEL,
+    MIN_BURNOFF_AFTER_CYCLES,
+    MIN_BURNOFF_AFTER_HOURS,
     MIN_BURNOFF_DURATION,
     MIN_HEATER_OFFSET,
     PROTOCOL_HEADER_ABBA,
@@ -66,17 +76,20 @@ from .const import (
     RUNNING_MODE_LEVEL,
     RUNNING_MODE_TEMPERATURE,
     RUNNING_MODE_VENTILATION,
+    RUNNING_STATE_OFF,
     RUNNING_STATE_ON,
     RUNNING_STEP_COOLDOWN,
     RUNNING_STEP_IGNITION,
     RUNNING_STEP_RUNNING,
     RUNNING_STEP_SELF_TEST,
+    RUNNING_STEP_STANDBY,
     SENSOR_TEMP_MAX,
     SENSOR_TEMP_MIN,
     SERVICE_UUID,
     SERVICE_UUID_ALT,
     STORAGE_KEY_AUTO_OFFSET_ENABLED,
     STORAGE_KEY_BURNOFF,
+    STORAGE_KEY_BURNOFF_ACCUMULATOR,
     STORAGE_KEY_FUEL_SINCE_RESET,
     STORAGE_KEY_LAST_REFUELED,
     STORAGE_KEY_TANK_CAPACITY,
@@ -105,6 +118,16 @@ from diesel_heater_ble import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Combustion steps. Standby is Auto Start/Stop idle (no re-ignite). Cooldown is
+# shutdown-in-progress (restore writes often do not stick).
+_BURNOFF_HEAT_STEPS = frozenset(
+    {
+        RUNNING_STEP_SELF_TEST,
+        RUNNING_STEP_IGNITION,
+        RUNNING_STEP_RUNNING,
+    }
+)
 
 
 class _HeaterLoggerAdapter(logging.LoggerAdapter):
@@ -236,23 +259,53 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self._last_auto_offset_time: float = 0.0
         self._current_heater_offset: int = 0  # Current offset sent to heater via cmd 12
 
-        # Max-power burn-off (soot burn-off) before shutdown
+        # Max-power soot burn-off. Three entry points, one accumulator:
+        # HA Off while dirty and heating; in-run when hours/cycles hit (RUNNING
+        # only); LCD Off while heating/cooldown sets pending for the next RUNNING.
         self._burnoff_lock = asyncio.Lock()
         self._burnoff_cancel_event = asyncio.Event()
         self._burnoff_task: asyncio.Task[None] | None = None
         self._burnoff_active = False
+        # True: HA Off path (restore then power off). False: in-run / Run Burn-off.
         self._burnoff_shutdown_after = False
         self._burnoff_ends_at: datetime | None = None
+        # Setpoint captured before Level 10; restored after the timer or on cancel.
         self._burnoff_saved_mode: int | None = None
         self._burnoff_saved_level: int | None = None
         self._burnoff_saved_temp: float | None = None
+        # True while we write mode/level so user commands are not treated as interference.
         self._burnoff_applying = False
         # Cycle ended; still need to write saved mode/level/temp when the ECU will accept it.
         self._burnoff_awaiting_snapshot_write = False
         # Cycle still running, but wait for live ECU status (HA reload or failed max-power write).
         self._burnoff_awaiting_first_status_after_reload = False
+        # Soot since last successful clean (persisted separately from the live cycle).
+        self._burnoff_heating_seconds: float = 0.0
+        # Leave-heating while still ON (controller Auto Start/Stop), not HA Off.
+        self._burnoff_cycles: int = 0
+        # Start in-run on next RUNNING (LCD Off, abort retry, or threshold before RUNNING).
+        self._burnoff_pending = False
+        # Last cycle succeeded; skip a second HA Off burn-off until heating resumes.
+        self._burnoff_just_completed = False
+        # Last successful parse. Parse-error running_state=0 is not a real LCD Off.
+        self._burnoff_prev_step: int | None = None
+        self._burnoff_prev_state: int | None = None
+        self._burnoff_prev_mode: int | None = None
+        # Power Off Now: the following ON→OFF must not set pending.
+        self._burnoff_skip_pending_on_off = False
+        # HA sent the off command; do not count that shutdown as a controller cycle.
+        self._burnoff_ha_power_off = False
+        # At most one in-run async_start_burnoff task at a time.
+        self._burnoff_start_scheduled = False
+        # Consecutive early in-run ECU aborts (Level 10 often trips Auto Start/Stop).
+        self._burnoff_in_run_aborts = 0
+        # Hours/cycles must not retrigger in-run. LCD pending and dirty HA Off still can.
+        self._burnoff_skip_in_run = False
         self.data["burnoff_active"] = False
         self.data["burnoff_remaining"] = None
+        self.data["burnoff_cycles"] = 0
+        self.data["burnoff_hours"] = 0.0
+        self.data["burnoff_pending"] = False
 
     @property
     def protocol_mode(self) -> int:
@@ -378,6 +431,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
                 # Resume in-progress max-power burn-off after HA restart
                 await self._load_burnoff_state(data.get(STORAGE_KEY_BURNOFF))
+                self._load_burnoff_accumulator(
+                    data.get(STORAGE_KEY_BURNOFF_ACCUMULATOR)
+                )
 
                 # Import existing history into statistics for native graphing
                 await self._import_all_history_statistics()
@@ -538,6 +594,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 # Settings
                 STORAGE_KEY_AUTO_OFFSET_ENABLED: self.data.get("auto_offset_enabled", False),
                 STORAGE_KEY_BURNOFF: self._burnoff_storage_payload(),
+                STORAGE_KEY_BURNOFF_ACCUMULATOR: self._burnoff_accumulator_payload(),
             }
             await self._store.async_save(data)
             self._logger.debug(
@@ -901,10 +958,13 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         if self.data.get("running_step") == RUNNING_STEP_RUNNING:
             self._total_runtime_seconds += elapsed_seconds
             self._daily_runtime_seconds += elapsed_seconds
+            self._accumulate_burnoff_hours(elapsed_seconds)
 
         # Update data dictionary (convert to hours for display)
         self.data["daily_runtime_hours"] = round(self._daily_runtime_seconds / 3600.0, 2)
         self.data["total_runtime_hours"] = round(self._total_runtime_seconds / 3600.0, 2)
+        self._publish_burnoff_accumulator()
+        self._maybe_start_in_run_burnoff()
 
     async def _check_daily_reset(self) -> None:
         """Check if we need to reset daily fuel counter (runs every update, even if offline)."""
@@ -1561,6 +1621,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 old_mode, self._protocol_mode, protocol.name
             )
 
+        # Soot/pending from this parse, then sync any live cycle with ECU cooldown.
+        self._observe_burnoff_status()
         self._schedule_burnoff_abort_if_ecu_stopped()
 
     def _apply_ui_temperature_offset(self) -> None:
@@ -1947,7 +2009,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
     @property
     def burnoff_enabled(self) -> bool:
-        """Return whether max-power burn-off before shutdown is enabled."""
+        """Return whether automatic burn-off (in-run and dirty Off) is enabled."""
         return bool(
             self.config_entry.data.get(CONF_BURNOFF_ENABLED, DEFAULT_BURNOFF_ENABLED)
         )
@@ -1966,9 +2028,40 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         return max(MIN_BURNOFF_DURATION, min(MAX_BURNOFF_DURATION, value))
 
     @property
+    def burnoff_after_cycles(self) -> int:
+        """Return in-run burn-off cycle threshold (0 = disabled)."""
+        try:
+            value = int(
+                self.config_entry.data.get(
+                    CONF_BURNOFF_AFTER_CYCLES, DEFAULT_BURNOFF_AFTER_CYCLES
+                )
+            )
+        except (TypeError, ValueError):
+            value = DEFAULT_BURNOFF_AFTER_CYCLES
+        return max(MIN_BURNOFF_AFTER_CYCLES, min(MAX_BURNOFF_AFTER_CYCLES, value))
+
+    @property
+    def burnoff_after_hours(self) -> int:
+        """Return in-run burn-off hours threshold (0 = disabled)."""
+        try:
+            value = int(
+                self.config_entry.data.get(
+                    CONF_BURNOFF_AFTER_HOURS, DEFAULT_BURNOFF_AFTER_HOURS
+                )
+            )
+        except (TypeError, ValueError):
+            value = DEFAULT_BURNOFF_AFTER_HOURS
+        return max(MIN_BURNOFF_AFTER_HOURS, min(MAX_BURNOFF_AFTER_HOURS, value))
+
+    @property
     def burnoff_active(self) -> bool:
         """Return whether a burn-off cycle is currently running."""
         return self._burnoff_active
+
+    @property
+    def burnoff_pending(self) -> bool:
+        """Return whether in-run burn-off will start on the next RUNNING step."""
+        return self._burnoff_pending
 
     @property
     def burnoff_remaining_seconds(self) -> int | None:
@@ -1978,8 +2071,18 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         remaining = (self._burnoff_ends_at - datetime.now(timezone.utc)).total_seconds()
         return max(0, int(remaining))
 
+    @property
+    def burnoff_cycles_since(self) -> int:
+        """Return controller heat cycles since the last successful burn-off."""
+        return self._burnoff_cycles
+
+    @property
+    def burnoff_hours_since(self) -> float:
+        """Return RUNNING hours since the last successful burn-off."""
+        return round(self._burnoff_heating_seconds / 3600.0, 2)
+
     def _burnoff_storage_payload(self) -> dict[str, Any] | None:
-        """Return persistable burn-off state, or None when inactive."""
+        """Return persistable live-cycle state, or None when no cycle is active."""
         if not self._burnoff_active:
             return None
         ends_at = self._burnoff_ends_at
@@ -1992,6 +2095,244 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             "saved_temp": self._burnoff_saved_temp,
             "awaiting_snapshot_write": self._burnoff_awaiting_snapshot_write,
         }
+
+    def _burnoff_accumulator_payload(self) -> dict[str, Any]:
+        """Return persistable soot-load counters and deferred in-run pending."""
+        return {
+            "seconds": self._burnoff_heating_seconds,
+            "cycles": self._burnoff_cycles,
+            "pending": self._burnoff_pending,
+            "just_completed": self._burnoff_just_completed,
+            "in_run_aborts": self._burnoff_in_run_aborts,
+            "skip_in_run": self._burnoff_skip_in_run,
+        }
+
+    def _load_burnoff_accumulator(self, payload: dict[str, Any] | None) -> None:
+        """Restore soot-load counters after Home Assistant restart."""
+        if not payload:
+            self._publish_burnoff_accumulator()
+            return
+        try:
+            self._burnoff_heating_seconds = max(0.0, float(payload.get("seconds", 0.0)))
+        except (TypeError, ValueError):
+            self._burnoff_heating_seconds = 0.0
+        try:
+            self._burnoff_cycles = max(0, int(payload.get("cycles", 0)))
+        except (TypeError, ValueError):
+            self._burnoff_cycles = 0
+        self._burnoff_pending = bool(payload.get("pending", False))
+        self._burnoff_just_completed = bool(payload.get("just_completed", False))
+        try:
+            self._burnoff_in_run_aborts = max(
+                0, int(payload.get("in_run_aborts", 0))
+            )
+        except (TypeError, ValueError):
+            self._burnoff_in_run_aborts = 0
+        self._burnoff_skip_in_run = bool(payload.get("skip_in_run", False))
+        self._publish_burnoff_accumulator()
+
+    def _publish_burnoff_accumulator(self) -> None:
+        """Copy soot-load counters into coordinator data for diagnostic entities."""
+        prev_pending = self.data.get("burnoff_pending")
+        prev_cycles = self.data.get("burnoff_cycles")
+        self.data["burnoff_cycles"] = self._burnoff_cycles
+        self.data["burnoff_hours"] = self.burnoff_hours_since
+        self.data["burnoff_pending"] = self._burnoff_pending
+        if (
+            prev_pending != self._burnoff_pending
+            or prev_cycles != self._burnoff_cycles
+        ):
+            self.async_set_updated_data(self.data)
+
+    def _reset_burnoff_accumulator(self) -> None:
+        """Mark soot cleaned. Does not clear an in-progress cycle or deferred restore."""
+        self._burnoff_heating_seconds = 0.0
+        self._burnoff_cycles = 0
+        self._burnoff_pending = False
+        self._burnoff_just_completed = True
+        self._burnoff_in_run_aborts = 0
+        self._burnoff_skip_in_run = False
+        self._publish_burnoff_accumulator()
+
+    def _burnoff_dirty(self) -> bool:
+        """Return True if there has been combustion since the last successful burn-off."""
+        if self._burnoff_heating_seconds > 0 or self._burnoff_cycles > 0:
+            return True
+        if self._burnoff_just_completed:
+            # Successful clean: wait for new heating before HA Off burns again.
+            return False
+        # First ticks of a heat session (or unit tests) before runtime has accumulated.
+        return (
+            self.data.get("running_state") == RUNNING_STATE_ON
+            and self.data.get("running_step") in _BURNOFF_HEAT_STEPS
+            and self.data.get("running_mode") != RUNNING_MODE_VENTILATION
+        )
+
+    def _burnoff_nearly_complete(self) -> bool:
+        """Return True if the timer is close enough to treat an abort as success."""
+        remaining = self.burnoff_remaining_seconds
+        duration_seconds = self.burnoff_duration_minutes * 60
+        if remaining is None or duration_seconds <= 0:
+            return False
+        # Last BURNOFF_NEAR_COMPLETE_REMAINING_RATIO of the timer (20%): soot
+        # is effectively burned; ECU cooldown from Level 10 is common here.
+        return remaining <= duration_seconds * BURNOFF_NEAR_COMPLETE_REMAINING_RATIO
+
+    def _burnoff_should_run_in_cycle(self) -> bool:
+        """Return True if in-run burn-off should start or be deferred as pending."""
+        if self._burnoff_pending:
+            # LCD Off / abort retry / mid-heat threshold. Overrides skip_in_run.
+            return True
+        if self._burnoff_skip_in_run:
+            return False
+        hours_limit = self.burnoff_after_hours
+        if hours_limit > 0 and self._burnoff_heating_seconds >= hours_limit * 3600:
+            return True
+        cycles_limit = self.burnoff_after_cycles
+        if cycles_limit > 0 and self._burnoff_cycles >= cycles_limit:
+            return True
+        return False
+
+    def _burnoff_hour_tick_cap(self) -> float:
+        """Return max RUNNING seconds to credit per status update."""
+        interval = (
+            UPDATE_INTERVAL_HCALORY
+            if self._protocol_mode == 7  # Hcalory
+            else UPDATE_INTERVAL
+        )
+        # Elapsed is now minus last successful poll. Two intervals covers one
+        # missed (or late) update; a long BLE disconnect must not dump hours.
+        return float(interval * 2)
+
+    def _accumulate_burnoff_hours(self, elapsed_seconds: float) -> None:
+        """Add RUNNING time to the soot accumulator."""
+        # Don't count the Level 10 interval itself as new soot.
+        if self._burnoff_active or elapsed_seconds <= 0:
+            return
+        if self.data.get("running_mode") == RUNNING_MODE_VENTILATION:
+            return
+        tick = min(elapsed_seconds, self._burnoff_hour_tick_cap())
+        if tick <= 0:
+            return
+        self._burnoff_heating_seconds += tick
+        self._burnoff_just_completed = False
+
+    def _schedule_burnoff_accumulator_save(self) -> None:
+        """Persist soot-load counters without blocking a status callback."""
+        self.hass.async_create_task(self.async_save_data())
+
+    def _observe_burnoff_status(self) -> None:
+        """Update soot load from a successful ECU status parse.
+
+        Only call after a successful parse. The parse-error path forces
+        running_state=0 and must not be treated as a real LCD Off.
+        """
+        prev_step = self._burnoff_prev_step
+        prev_state = self._burnoff_prev_state
+        prev_mode = self._burnoff_prev_mode
+        new_step = self.data.get("running_step")
+        new_state = self.data.get("running_state")
+        new_mode = self.data.get("running_mode")
+
+        accumulator_changed = False
+
+        # Auto Start/Stop: leave heating while still ON. Cooldown then standby
+        # is one cycle; HA Off must not increment (see _burnoff_ha_power_off).
+        if (
+            not self._burnoff_active
+            and prev_step is not None
+            and prev_state is not None
+            and not self._burnoff_ha_power_off
+            and prev_step in _BURNOFF_HEAT_STEPS
+            and new_step not in _BURNOFF_HEAT_STEPS
+            and new_state == RUNNING_STATE_ON
+            and prev_mode != RUNNING_MODE_VENTILATION
+            and new_mode != RUNNING_MODE_VENTILATION
+            and new_step in (RUNNING_STEP_STANDBY, RUNNING_STEP_COOLDOWN)
+        ):
+            self._burnoff_cycles += 1
+            self._burnoff_just_completed = False
+            accumulator_changed = True
+            self._logger.debug(
+                "Burn-off cycle count %d (step %s -> %s while ON)",
+                self._burnoff_cycles,
+                prev_step,
+                new_step,
+            )
+
+        # Real Off after a successful parse. Idle ON+standby → Off does not
+        # pending (user turned it off while already idle). Heating or cooldown
+        # → Off defers in-run to the next RUNNING; we must not re-ignite now.
+        if (
+            self.burnoff_enabled
+            and not self._burnoff_active
+            and prev_state == RUNNING_STATE_ON
+            and new_state == RUNNING_STATE_OFF
+        ):
+            if self._burnoff_skip_pending_on_off:
+                self._burnoff_skip_pending_on_off = False  # consumed (Power Off Now)
+            elif (
+                not self._burnoff_just_completed
+                and prev_mode != RUNNING_MODE_VENTILATION
+                and (
+                    prev_step in _BURNOFF_HEAT_STEPS
+                    or prev_step == RUNNING_STEP_COOLDOWN
+                )
+            ):
+                if not self._burnoff_pending:
+                    self._burnoff_pending = True
+                    accumulator_changed = True
+                    self._logger.info(
+                        "LCD/controller Off while dirty: "
+                        "burn-off pending for next RUNNING"
+                    )
+            self._burnoff_ha_power_off = False
+        elif prev_state == RUNNING_STATE_OFF and new_state == RUNNING_STATE_ON:
+            self._burnoff_skip_pending_on_off = False
+            self._burnoff_ha_power_off = False
+
+        self._burnoff_prev_step = new_step if isinstance(new_step, int) else None
+        self._burnoff_prev_state = new_state if isinstance(new_state, int) else None
+        self._burnoff_prev_mode = new_mode if isinstance(new_mode, int) else None
+
+        if accumulator_changed:
+            self._publish_burnoff_accumulator()
+            self._schedule_burnoff_accumulator_save()
+
+        self._maybe_start_in_run_burnoff()
+
+    def _maybe_start_in_run_burnoff(self) -> None:
+        """Start in-run burn-off once RUNNING, or remember pending until then."""
+        if not self.burnoff_enabled or self._burnoff_active:
+            return
+        if self.burnoff_duration_minutes < 1:
+            return
+        if self.data.get("running_mode") == RUNNING_MODE_VENTILATION:
+            return
+        if not self._burnoff_should_run_in_cycle():
+            return
+        # Established RUNNING only — not ignition or Auto Start/Stop standby.
+        if (
+            self.data.get("running_state") == RUNNING_STATE_ON
+            and self.data.get("running_step") == RUNNING_STEP_RUNNING
+        ):
+            if self._burnoff_start_scheduled:
+                return
+            self._burnoff_start_scheduled = True
+            self.hass.async_create_task(self._async_start_in_run_burnoff())
+            return
+        # Threshold already hit (or LCD Off) but not yet RUNNING.
+        if not self._burnoff_pending:
+            self._burnoff_pending = True
+            self._publish_burnoff_accumulator()
+            self._schedule_burnoff_accumulator_save()
+
+    async def _async_start_in_run_burnoff(self) -> None:
+        """Start max-power burn-off without shutting down afterwards."""
+        try:
+            await self.async_start_burnoff(shutdown_after=False)
+        finally:
+            self._burnoff_start_scheduled = False
 
     async def _load_burnoff_state(self, burnoff: dict[str, Any] | None) -> None:
         """Restore an in-progress burn-off after Home Assistant restart."""
@@ -2040,14 +2381,23 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """Push burn-off status into coordinator data for entities."""
         self.data["burnoff_active"] = self._burnoff_active
         self.data["burnoff_remaining"] = self.burnoff_remaining_seconds
+        self._publish_burnoff_accumulator()
         self.async_set_updated_data(self.data)
 
     async def async_set_burnoff_enabled(self, enabled: bool) -> None:
-        """Enable or disable max-power burn-off before shutdown."""
+        """Enable or disable automatic burn-off (in-run and dirty Off)."""
         new_data = {**self.config_entry.data, CONF_BURNOFF_ENABLED: bool(enabled)}
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
-        if not enabled and self._burnoff_active:
-            await self._cancel_burnoff(restore=True)
+        if not enabled:
+            # Master switch off: drop deferred in-run; restore if a cycle is live.
+            self._burnoff_pending = False
+            self._burnoff_skip_in_run = False
+            self._burnoff_in_run_aborts = 0
+            self._publish_burnoff_accumulator()
+            if self._burnoff_active:
+                await self._cancel_burnoff(restore=True)
+            else:
+                await self.async_save_data()
         self.async_set_updated_data(self.data)
 
     async def async_set_burnoff_duration(self, minutes: int) -> None:
@@ -2064,11 +2414,37 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
         self.async_set_updated_data(self.data)
 
+    async def async_set_burnoff_after_cycles(self, cycles: int) -> None:
+        """Set the in-run burn-off cycle threshold (0 disables)."""
+        try:
+            value = int(cycles)
+        except (TypeError, ValueError):
+            value = DEFAULT_BURNOFF_AFTER_CYCLES
+        value = max(MIN_BURNOFF_AFTER_CYCLES, min(MAX_BURNOFF_AFTER_CYCLES, value))
+        new_data = {**self.config_entry.data, CONF_BURNOFF_AFTER_CYCLES: value}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        self.async_set_updated_data(self.data)
+        self._maybe_start_in_run_burnoff()
+
+    async def async_set_burnoff_after_hours(self, hours: int) -> None:
+        """Set the in-run burn-off hours threshold (0 disables)."""
+        try:
+            value = int(hours)
+        except (TypeError, ValueError):
+            value = DEFAULT_BURNOFF_AFTER_HOURS
+        value = max(MIN_BURNOFF_AFTER_HOURS, min(MAX_BURNOFF_AFTER_HOURS, value))
+        new_data = {**self.config_entry.data, CONF_BURNOFF_AFTER_HOURS: value}
+        self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        self.async_set_updated_data(self.data)
+        self._maybe_start_in_run_burnoff()
+
     def _should_burnoff_before_shutdown(self) -> bool:
         """Return True if a shutdown request should start max-power burn-off."""
         if not self.burnoff_enabled:
             return False
         if self.burnoff_duration_minutes < 1:
+            return False
+        if not self._burnoff_dirty():
             return False
         if self.data.get("running_state") != RUNNING_STATE_ON:
             return False
@@ -2076,11 +2452,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             return False
         # Only start while actually heating. ON+STANDBY is Auto Start/Stop idle
         # and must not re-ignite at Level 10.
-        return self.data.get("running_step") in (
-            RUNNING_STEP_SELF_TEST,
-            RUNNING_STEP_IGNITION,
-            RUNNING_STEP_RUNNING,
-        )
+        return self.data.get("running_step") in _BURNOFF_HEAT_STEPS
 
     def _ecu_shutdown_observed(self) -> bool:
         """Return True if status shows the ECU has begun shutdown."""
@@ -2131,10 +2503,40 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             return
         if not self._ecu_shutdown_observed():
             return
+        was_in_run = not self._burnoff_shutdown_after
+        nearly_done = self._burnoff_nearly_complete()
         self._logger.info(
             "Burn-off aborted: heater stopped externally (controller or ECU)"
         )
         await self._cancel_burnoff(restore=True)
+        if not self.burnoff_enabled or self._burnoff_skip_pending_on_off:
+            return
+        if nearly_done:
+            # In-run or HA Off: the max-power interval already burned the soot.
+            self._logger.info(
+                "Burn-off aborted near timer end; treating as successful"
+            )
+            self._reset_burnoff_accumulator()
+            await self.async_save_data()
+            return
+        if was_in_run:
+            self._burnoff_in_run_aborts += 1
+            # > not >=: abort #1 (count == MAX) still retries; abort #2+ skips.
+            if self._burnoff_in_run_aborts > MAX_BURNOFF_IN_RUN_ABORTS:
+                self._logger.info(
+                    "In-run burn-off aborted %d time(s); skipping further "
+                    "threshold-triggered in-run until the next successful cycle",
+                    self._burnoff_in_run_aborts,
+                )
+                self._burnoff_skip_in_run = True
+                self._burnoff_pending = False
+                self._publish_burnoff_accumulator()
+                await self.async_save_data()
+                return
+        # Early HA Off abort, or first in-run abort: retry on next RUNNING.
+        self._burnoff_pending = True
+        self._publish_burnoff_accumulator()
+        await self.async_save_data()
 
     def _schedule_burnoff_wait(self) -> None:
         """Schedule the burn-off wait as a Home Assistant background task."""
@@ -2204,7 +2606,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
             self._burnoff_applying = False
 
     async def _clear_burnoff_state(self) -> None:
-        """Clear transient burn-off state and persist the inactive status."""
+        """Clear the live cycle (timer, snapshot, wait task). Leaves soot counters."""
         self._burnoff_active = False
         self._burnoff_shutdown_after = False
         self._burnoff_ends_at = None
@@ -2220,6 +2622,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
     async def _mark_awaiting_snapshot_write(self) -> None:
         """Remember that the snapshot still needs to be written to the ECU."""
         self._burnoff_awaiting_snapshot_write = True
+        # Cycle is over; remaining work is restore, not delayed Off.
         self._burnoff_shutdown_after = False
         await self.async_save_data()
         self._notify_burnoff_state()
@@ -2267,6 +2670,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         async with self._burnoff_lock:
             if not self._burnoff_active:
                 return
+            # Don't send Off if the ECU already stopped (ABBA toggle would restart).
             shutdown_after = (
                 self._burnoff_shutdown_after and not self._ecu_shutdown_observed()
             )
@@ -2275,6 +2679,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 shutdown_after,
                 self._ecu_can_restore(),
             )
+            # Soot is gone once the timer finishes, even if restore waits for cooldown.
+            self._reset_burnoff_accumulator()
             if not self._ecu_can_restore() or not await self._restore_saved_mode():
                 await self._mark_awaiting_snapshot_write()
                 return
@@ -2284,6 +2690,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
     async def _power_off(self) -> None:
         """Send the real power-off command."""
+        # So the observer does not count this shutdown as a controller heat cycle.
+        self._burnoff_ha_power_off = True
         # ABBA uses a toggle command (0xA1) for both ON and OFF.
         # Skip if already off, and never toggle during cooldown (would restart).
         if self._protocol_mode == 5 and (
@@ -2307,6 +2715,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         async with self._burnoff_lock:
             if self._burnoff_active:
                 if shutdown_after and not self._burnoff_shutdown_after:
+                    # In-run already running; HA Off latches delayed power-off onto it.
                     self._burnoff_shutdown_after = True
                     await self.async_save_data()
                 self._logger.debug(
@@ -2318,6 +2727,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
                 self._logger.warning("Cannot start burn-off: heater is not running")
                 return
 
+            self._burnoff_pending = False  # this start is the deferred (or HA Off) cycle
             self._burnoff_saved_mode = self.data.get("running_mode")
             self._burnoff_saved_level = self.data.get("set_level")
             self._burnoff_saved_temp = self.data.get("set_temp")
@@ -2373,6 +2783,8 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         real power-off command. Pass immediate=True to skip burn-off.
         """
         if immediate:
+            # Power Off Now: skip burn-off now and do not pending on the Off edge.
+            self._burnoff_skip_pending_on_off = True
             await self._cancel_burnoff(restore=True)
             if not self._ecu_shutdown_observed():
                 await self._power_off()
@@ -2380,8 +2792,10 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
 
         if self._burnoff_active:
             if self._burnoff_awaiting_snapshot_write or self._ecu_shutdown_observed():
+                # Restore only; sending Off while cooling can ABBA-toggle back on.
                 await self._cancel_burnoff(restore=True)
                 return
+            # Second Off during a live cycle: skip remaining time and power off.
             await self.async_turn_off(immediate=True)
             return
 

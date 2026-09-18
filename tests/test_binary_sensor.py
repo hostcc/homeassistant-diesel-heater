@@ -13,6 +13,7 @@ from custom_components.diesel_heater.binary_sensor import (
     VevorHeaterConnectedSensor,
     VevorAutoStartStopSensor,
     VevorBurnoffActiveSensor,
+    VevorBurnoffPendingSensor,
     async_setup_entry,
 )
 from custom_components.diesel_heater.const import (
@@ -184,8 +185,8 @@ class TestAsyncSetupEntry:
         # Verify async_add_entities was called
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 1 creates only 4 core sensors (no AutoStartStop)
-        assert len(call_args) == 4
+        # Mode 1 creates only 5 core sensors (no AutoStartStop)
+        assert len(call_args) == 5
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_0(self):
@@ -201,8 +202,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 0 creates all 5 sensors
-        assert len(call_args) == 5
+        # Mode 0 creates all 6 sensors
+        assert len(call_args) == 6
 
     @pytest.mark.asyncio
     async def test_async_setup_entry_protocol_mode_5(self):
@@ -218,8 +219,8 @@ class TestAsyncSetupEntry:
 
         async_add_entities.assert_called_once()
         call_args = async_add_entities.call_args[0][0]
-        # Mode 5 includes AutoStartStop (5 sensors)
-        assert len(call_args) == 5
+        # Mode 5 includes AutoStartStop (6 sensors)
+        assert len(call_args) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -479,5 +480,25 @@ class TestVevorBurnoffActiveSensor:
         coordinator = create_mock_coordinator()
         coordinator.burnoff_active = False
         sensor = VevorBurnoffActiveSensor(coordinator)
+
+        assert sensor.is_on is False
+
+
+class TestVevorBurnoffPendingSensor:
+    """Tests for burn-off pending binary sensor."""
+
+    def test_is_on_when_pending(self):
+        """Test is_on when in-run burn-off is deferred."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_pending = True
+        sensor = VevorBurnoffPendingSensor(coordinator)
+
+        assert sensor.is_on is True
+
+    def test_is_on_when_not_pending(self):
+        """Test is_on when no deferred burn-off is waiting."""
+        coordinator = create_mock_coordinator()
+        coordinator.burnoff_pending = False
+        sensor = VevorBurnoffPendingSensor(coordinator)
 
         assert sensor.is_on is False

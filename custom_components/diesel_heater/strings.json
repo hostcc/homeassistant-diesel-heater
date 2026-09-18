@@ -159,6 +159,12 @@
       },
       "burnoff_remaining": {
         "name": "Burn-off Remaining"
+      },
+      "burnoff_cycles": {
+        "name": "Heat Cycles Since Burn-off"
+      },
+      "burnoff_hours": {
+        "name": "Heat Hours Since Burn-off"
       }
     },
     "binary_sensor": {
@@ -176,6 +182,9 @@
       },
       "burnoff_active": {
         "name": "Burn-off Active"
+      },
+      "burnoff_pending": {
+        "name": "Burn-off Pending"
       }
     },
     "climate": {
@@ -206,6 +215,12 @@
       },
       "burnoff_duration": {
         "name": "Burn-off Duration"
+      },
+      "burnoff_after_cycles": {
+        "name": "Burn-off After Cycles"
+      },
+      "burnoff_after_hours": {
+        "name": "Burn-off After Hours"
       }
     },
     "select": {
