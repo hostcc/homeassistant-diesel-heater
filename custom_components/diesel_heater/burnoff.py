@@ -212,7 +212,9 @@ class BurnoffController:
         if self.accumulator.heating_seconds > 0 or self.accumulator.cycles > 0:
             return True
         if self.accumulator.just_completed:
+            # Successful clean: wait for new heating before HA Off burns again.
             return False
+        # First ticks of a heat session (or unit tests) before runtime has accumulated.
         data = self._host.data
         return (
             data.get("running_state") == RUNNING_STATE_ON
@@ -231,6 +233,7 @@ class BurnoffController:
     def should_run_in_cycle(self) -> bool:
         """Return True if in-run burn-off should start or be deferred as pending."""
         if self.accumulator.pending:
+            # LCD Off / abort retry / mid-heat threshold. Overrides skip_in_run.
             return True
         if self.accumulator.skip_in_run:
             return False
@@ -249,10 +252,13 @@ class BurnoffController:
             if self._host._protocol_mode == 7
             else UPDATE_INTERVAL
         )
+        # Elapsed is now minus last successful poll. Two intervals covers one
+        # missed (or late) update; a long BLE disconnect must not dump hours.
         return float(interval * 2)
 
     def accumulate_hours(self, elapsed_seconds: float) -> None:
         """Add RUNNING time to the soot accumulator."""
+        # Don't count the Level 10 interval itself as new soot.
         if self.active or elapsed_seconds <= 0:
             return
         if self._host.data.get("running_mode") == RUNNING_MODE_VENTILATION:
@@ -354,6 +360,7 @@ class BurnoffController:
             return
         if not self.should_run_in_cycle():
             return
+        # Established RUNNING only — not ignition or Auto Start/Stop standby.
         if (
             self._host.data.get("running_state") == RUNNING_STATE_ON
             and self._host.data.get("running_step") == RUNNING_STEP_RUNNING
@@ -365,6 +372,7 @@ class BurnoffController:
                 self._host._async_start_in_run_burnoff()
             )
             return
+        # Threshold already hit (or LCD Off) but not yet RUNNING.
         if not self.accumulator.pending:
             self.accumulator.pending = True
             self.publish_accumulator()
@@ -460,6 +468,8 @@ class BurnoffController:
             return False
         if data.get("running_mode") == RUNNING_MODE_VENTILATION:
             return False
+        # Only start while actually heating. ON+STANDBY is Auto Start/Stop idle
+        # and must not re-ignite at Level 10.
         return data.get("running_step") in BURNOFF_HEAT_STEPS
 
     def ecu_shutdown_observed(self) -> bool:
@@ -496,12 +506,15 @@ class BurnoffController:
             return
 
         if self.cycle.phase == BurnoffPhase.AWAITING_STATUS:
+            # One-shot, same as the old awaiting-first-status flag: leave this
+            # phase before the BLE work so a later parse cannot queue another
+            # complete or max-power write. Cooldown is handled above.
+            self.cycle.phase = BurnoffPhase.RUNNING
             remaining = self.remaining_seconds
             if remaining is None or remaining <= 0:
                 self._host.hass.async_create_task(self._host._complete_burnoff())
             else:
                 self._host.hass.async_create_task(self._host._apply_max_power())
-                self.cycle.phase = BurnoffPhase.RUNNING
 
     async def abort_on_external_shutdown(self) -> None:
         """Cancel burn-off when the ECU stopped outside Home Assistant."""
@@ -618,6 +631,7 @@ class BurnoffController:
     async def mark_restoring(self) -> None:
         """Remember that the snapshot still needs to be written to the ECU."""
         self.cycle.phase = BurnoffPhase.RESTORING
+        # Cycle is over; remaining work is restore, not delayed Off.
         self.cycle.shutdown_after = False
         await self._host.async_save_data()
         self.notify_state()
@@ -661,6 +675,7 @@ class BurnoffController:
         async with self.lock:
             if not self.active:
                 return
+            # Don't send Off if the ECU already stopped (ABBA toggle would restart).
             shutdown_after = (
                 self.cycle.shutdown_after and not self.ecu_shutdown_observed()
             )
@@ -669,6 +684,7 @@ class BurnoffController:
                 shutdown_after,
                 self.ecu_can_restore(),
             )
+            # Soot is gone once the timer finishes, even if restore waits for cooldown.
             self.reset_accumulator()
             if not self.ecu_can_restore() or not await self.restore_saved_mode():
                 await self.mark_restoring()

@@ -4715,13 +4715,15 @@ class TestBurnoffOnShutdown:
 
         coordinator.hass.async_create_task = _create_task
         coordinator._schedule_burnoff_abort_if_ecu_stopped()
-        assert tasks
+        assert coordinator._burnoff.cycle.phase == BurnoffPhase.RUNNING
+        coordinator._schedule_burnoff_abort_if_ecu_stopped()
+        assert len(tasks) == 1
         await tasks[0]
 
         commands = [call[0] for call in coordinator._send_command.call_args_list]
         assert (2, RUNNING_MODE_LEVEL) in commands
         assert (4, MAX_LEVEL) in commands
-        assert coordinator._burnoff.cycle.phase != BurnoffPhase.AWAITING_STATUS
+        assert coordinator._burnoff.cycle.phase == BurnoffPhase.RUNNING
 
     @pytest.mark.asyncio
     async def test_resume_expired_completes_after_heating_status(self):
@@ -4744,7 +4746,9 @@ class TestBurnoffOnShutdown:
 
         coordinator.hass.async_create_task = _create_task
         coordinator._schedule_burnoff_abort_if_ecu_stopped()
-        assert tasks
+        assert coordinator._burnoff.cycle.phase == BurnoffPhase.RUNNING
+        coordinator._schedule_burnoff_abort_if_ecu_stopped()
+        assert len(tasks) == 1
         await tasks[0]
 
         commands = [call[0] for call in coordinator._send_command.call_args_list]

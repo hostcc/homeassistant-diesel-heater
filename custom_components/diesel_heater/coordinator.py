@@ -5,7 +5,6 @@ import asyncio
 import logging
 import random
 import time
-from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -2019,6 +2018,9 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """Return RUNNING hours since the last successful burn-off."""
         return self._burnoff.hours_since
 
+    # Private wrappers below exist so BurnoffController can call back through the
+    # host. Tests patch these coordinator methods; each wrapper forwards to the
+    # controller, so the call is controller -> coordinator -> controller.
     def _burnoff_storage_payload(self) -> dict[str, Any] | None:
         """Return persistable live-cycle state, or None when no cycle is active."""
         return self._burnoff.storage_payload()
