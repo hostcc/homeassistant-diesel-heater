@@ -15,6 +15,7 @@ import pytest
 from . import conftest  # noqa: F401
 
 # Now we can import the coordinator
+from custom_components.diesel_heater.burnoff import BurnoffController
 from custom_components.diesel_heater.coordinator import VevorHeaterCoordinator
 from custom_components.diesel_heater.const import (
     FUEL_CONSUMPTION_TABLE,
@@ -181,31 +182,8 @@ def create_mock_coordinator() -> VevorHeaterCoordinator:
     coordinator.async_set_updated_data = MagicMock()
     coordinator.async_request_refresh = AsyncMock()
 
-    # Max-power burn-off state (normally set in __init__)
-    coordinator._burnoff_lock = asyncio.Lock()
-    coordinator._burnoff_cancel_event = asyncio.Event()
-    coordinator._burnoff_task = None
-    coordinator._burnoff_active = False
-    coordinator._burnoff_shutdown_after = False
-    coordinator._burnoff_ends_at = None
-    coordinator._burnoff_saved_mode = None
-    coordinator._burnoff_saved_level = None
-    coordinator._burnoff_saved_temp = None
-    coordinator._burnoff_applying = False
-    coordinator._burnoff_awaiting_snapshot_write = False
-    coordinator._burnoff_awaiting_first_status_after_reload = False
-    coordinator._burnoff_heating_seconds = 0.0
-    coordinator._burnoff_cycles = 0
-    coordinator._burnoff_pending = False
-    coordinator._burnoff_just_completed = False
-    coordinator._burnoff_prev_step = None
-    coordinator._burnoff_prev_state = None
-    coordinator._burnoff_prev_mode = None
-    coordinator._burnoff_skip_pending_on_off = False
-    coordinator._burnoff_ha_power_off = False
-    coordinator._burnoff_start_scheduled = False
-    coordinator._burnoff_in_run_aborts = 0
-    coordinator._burnoff_skip_in_run = False
+    # Max-power burn-off (normally constructed in __init__)
+    coordinator._burnoff = BurnoffController(coordinator)
     coordinator.data["burnoff_active"] = False
     coordinator.data["burnoff_remaining"] = None
     coordinator.data["burnoff_cycles"] = 0
@@ -4357,6 +4335,7 @@ class TestBurnoffOnShutdown:
         saved = coordinator._store.async_save.call_args[0][0]
         payload = saved[STORAGE_KEY_BURNOFF]
         assert payload["active"] is True
+        assert payload["phase"] == "running"
         assert payload["shutdown_after"] is True
         assert payload["saved_mode"] == RUNNING_MODE_TEMPERATURE
         assert payload["ends_at"] is not None
@@ -4366,6 +4345,7 @@ class TestBurnoffOnShutdown:
         await resumed._load_burnoff_state(payload)
 
         assert resumed.burnoff_active is True
+        assert resumed._burnoff.cycle.phase.value == "awaiting_status"
         assert resumed._burnoff_shutdown_after is True
         assert resumed._burnoff_saved_mode == RUNNING_MODE_TEMPERATURE
         assert resumed.burnoff_remaining_seconds is not None
