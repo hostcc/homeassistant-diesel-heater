@@ -29,7 +29,7 @@ from homeassistant.util import dt as dt_util
 
 from homeassistant.helpers.event import async_track_state_change_event
 
-from .burnoff import BurnoffController
+from .burnoff import BurnoffController, BurnoffPhase
 from .const import (
     ABBA_NOTIFY_UUID,
     ABBA_SERVICE_UUID,
@@ -247,25 +247,6 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         self.data["burnoff_cycles"] = 0
         self.data["burnoff_hours"] = 0.0
         self.data["burnoff_pending"] = False
-
-    def __getattr__(self, name: str) -> Any:
-        """Map `_burnoff_*` field reads onto the burn-off controller."""
-        if name.startswith("_burnoff") and name != "_burnoff":
-            burnoff = self.__dict__.get("_burnoff")
-            if burnoff is not None:
-                try:
-                    return burnoff.get_alias(name)
-                except KeyError:
-                    pass
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        """Map `_burnoff_*` field writes onto the burn-off controller."""
-        if name != "_burnoff" and name.startswith("_burnoff"):
-            burnoff = self.__dict__.get("_burnoff")
-            if burnoff is not None and burnoff.set_alias(name, value):
-                return
-        super().__setattr__(name, value)
 
     @property
     def protocol_mode(self) -> int:
@@ -2263,14 +2244,17 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         """
         if immediate:
             # Power Off Now: skip burn-off now and do not pending on the Off edge.
-            self._burnoff_skip_pending_on_off = True
+            self._burnoff.skip_pending_on_off = True
             await self._cancel_burnoff(restore=True)
             if not self._ecu_shutdown_observed():
                 await self._power_off()
             return
 
-        if self._burnoff_active:
-            if self._burnoff_awaiting_snapshot_write or self._ecu_shutdown_observed():
+        if self._burnoff.active:
+            if (
+                self._burnoff.cycle.phase == BurnoffPhase.RESTORING
+                or self._ecu_shutdown_observed()
+            ):
                 # Restore only; sending Off while cooling can ABBA-toggle back on.
                 await self._cancel_burnoff(restore=True)
                 return
@@ -2297,7 +2281,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         - Hcalory uses SEPARATE commands: cmd 5 for level, cmd 4 for temperature
         - AAXX protocols use SAME command (cmd 4) for both level and temperature
         """
-        if self._burnoff_active and not self._burnoff_applying:
+        if self._burnoff.active and not self._burnoff.cycle.applying:
             self._logger.info("Ignoring level change during burn-off")
             return False
 
@@ -2334,7 +2318,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         - AAXX protocols (modes 1-4): 8-36°C
         - Other protocols: 8-36°C (safe default)
         """
-        if self._burnoff_active and not self._burnoff_applying:
+        if self._burnoff.active and not self._burnoff.cycle.applying:
             self._logger.info("Ignoring temperature change during burn-off")
             return False
 
@@ -2383,7 +2367,7 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         Mode 3 (Ventilation) is ABBA-only and only works when heater is in standby.
         It activates fan-only mode without heating.
         """
-        if self._burnoff_active and not self._burnoff_applying:
+        if self._burnoff.active and not self._burnoff.cycle.applying:
             self._logger.info("Ignoring mode change during burn-off")
             return False
 

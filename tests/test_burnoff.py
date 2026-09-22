@@ -38,34 +38,17 @@ def test_phases_are_mutually_exclusive():
     controller.cycle.ends_at = datetime.now(timezone.utc) + timedelta(minutes=5)
     assert controller.active is True
     assert controller.remaining_seconds is not None
-    assert controller.get_alias("_burnoff_awaiting_snapshot_write") is False
-    assert controller.get_alias("_burnoff_awaiting_first_status_after_reload") is False
+    assert controller.cycle.phase == BurnoffPhase.RUNNING
 
     controller.cycle.phase = BurnoffPhase.AWAITING_STATUS
     assert controller.active is True
-    assert controller.get_alias("_burnoff_awaiting_first_status_after_reload") is True
-    assert controller.get_alias("_burnoff_awaiting_snapshot_write") is False
+    assert controller.cycle.phase == BurnoffPhase.AWAITING_STATUS
     assert controller.remaining_seconds is not None
 
     controller.cycle.phase = BurnoffPhase.RESTORING
     assert controller.active is True
-    assert controller.get_alias("_burnoff_awaiting_snapshot_write") is True
-    assert controller.get_alias("_burnoff_awaiting_first_status_after_reload") is False
-    assert controller.remaining_seconds is None
-
-
-def test_alias_setters_cannot_represent_restoring_and_awaiting():
-    """Setting one awaiting flag clears the other by switching phase."""
-    controller = BurnoffController(host=MagicMock())
-    controller.set_alias("_burnoff_active", True)
-    controller.set_alias("_burnoff_awaiting_snapshot_write", True)
-    controller.set_alias("_burnoff_awaiting_first_status_after_reload", True)
-    assert controller.cycle.phase == BurnoffPhase.AWAITING_STATUS
-    assert controller.get_alias("_burnoff_awaiting_snapshot_write") is False
-
-    controller.set_alias("_burnoff_awaiting_snapshot_write", True)
     assert controller.cycle.phase == BurnoffPhase.RESTORING
-    assert controller.get_alias("_burnoff_awaiting_first_status_after_reload") is False
+    assert controller.remaining_seconds is None
 
 
 def test_storage_payload_writes_phase_and_legacy_flag():
@@ -184,7 +167,7 @@ def test_observe_status_edges(prev, new, expect_pending, expect_cycles):
     coordinator._observe_burnoff_status()
 
     assert coordinator.burnoff_pending is expect_pending
-    assert coordinator._burnoff_cycles == expect_cycles
+    assert coordinator._burnoff.accumulator.cycles == expect_cycles
 
 
 def test_ha_power_off_does_not_count_cycle():
@@ -196,14 +179,14 @@ def test_ha_power_off_does_not_count_cycle():
         return MagicMock()
 
     coordinator.hass.async_create_task = _close_task
-    coordinator._burnoff_ha_power_off = True
+    coordinator._burnoff.ha_power_off = True
     coordinator.data["running_state"] = RUNNING_STATE_ON
     coordinator.data["running_step"] = RUNNING_STEP_RUNNING
     coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
     coordinator._observe_burnoff_status()
     coordinator.data["running_step"] = RUNNING_STEP_COOLDOWN
     coordinator._observe_burnoff_status()
-    assert coordinator._burnoff_cycles == 0
+    assert coordinator._burnoff.accumulator.cycles == 0
 
 
 def test_parse_error_off_without_observe_does_not_pending():
