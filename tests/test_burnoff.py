@@ -73,7 +73,7 @@ def test_storage_payload_writes_phase_and_legacy_flag():
 async def test_load_state_falls_back_from_legacy_awaiting_flags():
     """Old payloads without phase still resume restoring vs awaiting-status."""
     coordinator = create_mock_coordinator()
-    coordinator._schedule_burnoff_wait = MagicMock()
+    coordinator._burnoff.schedule_wait = MagicMock()
 
     restoring = {
         "active": True,
@@ -84,13 +84,13 @@ async def test_load_state_falls_back_from_legacy_awaiting_flags():
         "saved_temp": None,
         "awaiting_snapshot_write": True,
     }
-    await coordinator._load_burnoff_state(restoring)
+    await coordinator._burnoff.load_state(restoring)
     assert coordinator._burnoff.cycle.phase == BurnoffPhase.RESTORING
-    coordinator._schedule_burnoff_wait.assert_not_called()
+    coordinator._burnoff.schedule_wait.assert_not_called()
 
     resumed = create_mock_coordinator()
-    resumed._schedule_burnoff_wait = MagicMock()
-    await resumed._load_burnoff_state(
+    resumed._burnoff.schedule_wait = MagicMock()
+    await resumed._burnoff.load_state(
         {
             "active": True,
             "shutdown_after": True,
@@ -101,11 +101,11 @@ async def test_load_state_falls_back_from_legacy_awaiting_flags():
         }
     )
     assert resumed._burnoff.cycle.phase == BurnoffPhase.AWAITING_STATUS
-    resumed._schedule_burnoff_wait.assert_called_once()
+    resumed._burnoff.schedule_wait.assert_called_once()
 
     phased = create_mock_coordinator()
-    phased._schedule_burnoff_wait = MagicMock()
-    await phased._load_burnoff_state(
+    phased._burnoff.schedule_wait = MagicMock()
+    await phased._burnoff.load_state(
         {
             "active": True,
             "phase": BurnoffPhase.RESTORING,
@@ -118,7 +118,7 @@ async def test_load_state_falls_back_from_legacy_awaiting_flags():
         }
     )
     assert phased._burnoff.cycle.phase == BurnoffPhase.RESTORING
-    phased._schedule_burnoff_wait.assert_not_called()
+    phased._burnoff.schedule_wait.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -159,12 +159,12 @@ def test_observe_status_edges(prev, new, expect_pending, expect_cycles):
     coordinator.data["running_state"] = prev_state
     coordinator.data["running_step"] = prev_step
     coordinator.data["running_mode"] = prev_mode
-    coordinator._observe_burnoff_status()
+    coordinator._burnoff.observe_status()
 
     coordinator.data["running_state"] = new_state
     coordinator.data["running_step"] = new_step
     coordinator.data["running_mode"] = new_mode
-    coordinator._observe_burnoff_status()
+    coordinator._burnoff.observe_status()
 
     assert coordinator.burnoff_pending is expect_pending
     assert coordinator._burnoff.accumulator.cycles == expect_cycles
@@ -183,9 +183,9 @@ def test_ha_power_off_does_not_count_cycle():
     coordinator.data["running_state"] = RUNNING_STATE_ON
     coordinator.data["running_step"] = RUNNING_STEP_RUNNING
     coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
-    coordinator._observe_burnoff_status()
+    coordinator._burnoff.observe_status()
     coordinator.data["running_step"] = RUNNING_STEP_COOLDOWN
-    coordinator._observe_burnoff_status()
+    coordinator._burnoff.observe_status()
     assert coordinator._burnoff.accumulator.cycles == 0
 
 
@@ -196,7 +196,7 @@ def test_parse_error_off_without_observe_does_not_pending():
     coordinator.data["running_state"] = RUNNING_STATE_ON
     coordinator.data["running_step"] = RUNNING_STEP_RUNNING
     coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
-    coordinator._observe_burnoff_status()
+    coordinator._burnoff.observe_status()
     coordinator.data["running_state"] = 0
     coordinator.data["running_step"] = 0
     assert coordinator.burnoff_pending is False

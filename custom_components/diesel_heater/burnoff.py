@@ -85,8 +85,8 @@ class BurnoffAccumulator:
 class BurnoffController:
     """Owns burn-off phase, soot counters, wait task, and one-shot Off intents.
 
-    Command writes stay on the host (coordinator). Methods that tests patch on
-    the host are looked up at call time so mocks still intercept.
+    Command writes stay on the host (coordinator). Tests patch methods on this
+    controller; lookups happen on self at call time so mocks still intercept.
     """
 
     def __init__(self, host: Any) -> None:
@@ -103,6 +103,17 @@ class BurnoffController:
         self.ha_power_off = False
         # At most one in-run async_start_burnoff task at a time.
         self.start_scheduled = False
+        # Entity fields only. Listeners are not ready while the host is constructed.
+        self._seed_data()
+
+    def _seed_data(self) -> None:
+        """Write initial entity fields without notifying listeners."""
+        data = self._host.data
+        data["burnoff_active"] = False
+        data["burnoff_remaining"] = None
+        data["burnoff_cycles"] = 0
+        data["burnoff_hours"] = 0.0
+        data["burnoff_pending"] = False
 
     @property
     def active(self) -> bool:
@@ -348,7 +359,7 @@ class BurnoffController:
             self.publish_accumulator()
             self._schedule_accumulator_save()
 
-        self._host._maybe_start_in_run_burnoff()
+        self.maybe_start_in_run()
 
     def maybe_start_in_run(self) -> None:
         """Start in-run burn-off once RUNNING, or remember pending until then."""
@@ -368,9 +379,7 @@ class BurnoffController:
             if self.start_scheduled:
                 return
             self.start_scheduled = True
-            self._host.hass.async_create_task(
-                self._host._async_start_in_run_burnoff()
-            )
+            self._host.hass.async_create_task(self.start_in_run())
             return
         # Threshold already hit (or LCD Off) but not yet RUNNING.
         if not self.accumulator.pending:
@@ -445,7 +454,7 @@ class BurnoffController:
         if self.cycle.phase == BurnoffPhase.RESTORING:
             return
         if remaining is not None and remaining > 0:
-            self._host._schedule_burnoff_wait()
+            self.schedule_wait()
 
     def notify_state(self) -> None:
         """Push burn-off status into coordinator data for entities."""
@@ -493,16 +502,14 @@ class BurnoffController:
 
         if self.cycle.phase == BurnoffPhase.RESTORING:
             if self.ecu_can_restore():
-                self._host.hass.async_create_task(self._host._try_snapshot_write())
+                self._host.hass.async_create_task(self.try_snapshot_write())
             return
 
         if self.ecu_shutdown_observed():
             if self.cancel_event.is_set():
                 return
             self.cancel_event.set()
-            self._host.hass.async_create_task(
-                self._host._abort_burnoff_on_external_shutdown()
-            )
+            self._host.hass.async_create_task(self.abort_on_external_shutdown())
             return
 
         if self.cycle.phase == BurnoffPhase.AWAITING_STATUS:
@@ -512,9 +519,9 @@ class BurnoffController:
             self.cycle.phase = BurnoffPhase.RUNNING
             remaining = self.remaining_seconds
             if remaining is None or remaining <= 0:
-                self._host.hass.async_create_task(self._host._complete_burnoff())
+                self._host.hass.async_create_task(self.complete())
             else:
-                self._host.hass.async_create_task(self._host._apply_max_power())
+                self._host.hass.async_create_task(self.apply_max_power())
 
     async def abort_on_external_shutdown(self) -> None:
         """Cancel burn-off when the ECU stopped outside Home Assistant."""
@@ -527,7 +534,7 @@ class BurnoffController:
         self._host._logger.info(
             "Burn-off aborted: heater stopped externally (controller or ECU)"
         )
-        await self._host._cancel_burnoff(restore=True)
+        await self.cancel(restore=True)
         if not self._host.burnoff_enabled or self.skip_pending_on_off:
             return
         if nearly_done:
@@ -560,7 +567,7 @@ class BurnoffController:
             return
         self.cancel_event.clear()
         self.task = self._host.hass.async_create_background_task(
-            self._host._burnoff_wait(),
+            self.wait(),
             name="diesel_heater_burnoff_wait",
         )
 
@@ -582,7 +589,7 @@ class BurnoffController:
                     continue
             if self.cancel_event.is_set():
                 return
-            await self._host._complete_burnoff()
+            await self.complete()
         except asyncio.CancelledError:
             self._host._logger.debug("Burn-off wait cancelled")
             raise
@@ -645,6 +652,20 @@ class BurnoffController:
                 return
             if await self.restore_saved_mode():
                 await self.clear_state()
+
+    async def disable(self) -> None:
+        """Drop deferred in-run state and restore if a cycle is live.
+
+        Called when the master burn-off switch is turned off.
+        """
+        self.accumulator.pending = False
+        self.accumulator.skip_in_run = False
+        self.accumulator.in_run_aborts = 0
+        self.publish_accumulator()
+        if self.active:
+            await self.cancel(restore=True)
+            return
+        await self._host.async_save_data()
 
     async def cancel(self, *, restore: bool) -> None:
         """Cancel an in-progress burn-off, optionally restoring the previous mode."""
@@ -732,7 +753,7 @@ class BurnoffController:
                 self.cycle.phase = BurnoffPhase.AWAITING_STATUS
             await self._host.async_save_data()
             self.notify_state()
-            self._host._schedule_burnoff_wait()
+            self.schedule_wait()
 
     async def stop_wait_task(self) -> None:
         """Cancel the wait task without changing persisted cycle state."""
