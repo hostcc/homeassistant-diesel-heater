@@ -4765,6 +4765,51 @@ class TestBurnoffOnShutdown:
         assert (3, 0) not in commands
 
     @pytest.mark.asyncio
+    async def test_manual_burnoff_lcd_off_keeps_original_snapshot(self):
+        """Manual burn-off resumes after LCD Off with its original snapshot."""
+        coordinator = create_mock_coordinator()
+        _set_heating(coordinator)
+        coordinator.data["running_mode"] = RUNNING_MODE_TEMPERATURE
+        coordinator.data["set_temp"] = 21
+        coordinator._send_command = AsyncMock(return_value=True)
+        coordinator._burnoff.schedule_wait = MagicMock()
+
+        await coordinator.async_run_burnoff()
+
+        assert coordinator._burnoff.cycle.resume_after_external_off is True
+        assert coordinator._burnoff.cycle.saved_mode == RUNNING_MODE_TEMPERATURE
+        assert coordinator._burnoff.cycle.saved_temp == 21
+
+        coordinator.data["running_state"] = RUNNING_STATE_OFF
+        await coordinator._burnoff.abort_on_external_shutdown()
+
+        assert coordinator._burnoff.cycle.phase == BurnoffPhase.PAUSED
+        assert coordinator._burnoff.cycle.saved_mode == RUNNING_MODE_TEMPERATURE
+        assert coordinator._burnoff.cycle.saved_temp == 21
+
+        persisted = coordinator._burnoff.storage_payload()
+        resumed = create_mock_coordinator()
+        await resumed._burnoff.load_state(persisted)
+
+        assert resumed._burnoff.cycle.phase == BurnoffPhase.PAUSED
+        assert resumed._burnoff.cycle.resume_after_external_off is True
+        assert resumed._burnoff.cycle.saved_mode == RUNNING_MODE_TEMPERATURE
+        assert resumed._burnoff.cycle.saved_temp == 21
+
+        coordinator.data["running_state"] = RUNNING_STATE_ON
+        coordinator.data["running_step"] = RUNNING_STEP_RUNNING
+        await coordinator._burnoff.resume_after_external_shutdown()
+
+        assert coordinator._burnoff.cycle.phase == BurnoffPhase.RUNNING
+        coordinator._send_command.assert_any_call(4, 10)
+
+        await coordinator._burnoff.complete()
+
+        commands = [call[0] for call in coordinator._send_command.call_args_list]
+        assert (2, RUNNING_MODE_TEMPERATURE) in commands
+        assert (4, 21) in commands
+
+    @pytest.mark.asyncio
     async def test_abort_skipped_while_still_running(self):
         """Burn-off continues when the heater is still ON and heating."""
         coordinator = create_mock_coordinator()

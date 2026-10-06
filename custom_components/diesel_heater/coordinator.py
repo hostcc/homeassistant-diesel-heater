@@ -2502,17 +2502,28 @@ class VevorHeaterCoordinator(DataUpdateCoordinator):
         else:
             self._burnoff.ha_power_off = False
 
-    async def async_start_burnoff(self, *, shutdown_after: bool = True) -> None:
+    async def async_start_burnoff(
+        self,
+        *,
+        shutdown_after: bool = True,
+        resume_after_external_off: bool = False,
+    ) -> None:
         """Run at max power, optionally shutting down when the timer expires.
 
         Snapshots the current running mode and setpoint so they can be restored
         before power-off (or when burn-off is cancelled).
         """
-        await self._burnoff.start(shutdown_after=shutdown_after)
+        await self._burnoff.start(
+            shutdown_after=shutdown_after,
+            resume_after_external_off=resume_after_external_off,
+        )
 
     async def async_run_burnoff(self) -> None:
         """Run a max-power burn-off without shutting down afterwards."""
-        await self.async_start_burnoff(shutdown_after=False)
+        await self.async_start_burnoff(
+            shutdown_after=False,
+            resume_after_external_off=True,
+        )
 
     async def async_power_off_now(self) -> None:
         """Skip burn-off and power off immediately."""
